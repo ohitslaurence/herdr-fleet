@@ -1,0 +1,1211 @@
+#!/usr/bin/env python3
+"""dev — task-first worktrees in herdr: one command opens a branch, a worktree and a workspace.
+
+Single-repo contexts branch as <repo>__<task> with the checkout at <repo-path>-wt-<task>;
+cross-repo contexts branch as <task> in every repo. Repos come from the fleet config's [dev]
+section. `dev help` for usage.
+
+Python port of a Node original; comments that mention Node explain output kept identical
+to it. Standard library only.
+"""
+from __future__ import annotations
+
+import json, os, re, shlex, shutil, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+# Worktree paths and branch names come from templates (~/.config/fleet/config.toml); the
+# defaults are the historical <repo-path>-wt-<task> and <repo>__<task>.
+from fleet_paths import NO_HOOKS, branch_name, branch_task, dev_owned, pr_worktree_path  # noqa: E402
+from fleet_paths import worktree_path as worktree_path_of  # noqa: E402
+from dataclasses import dataclass
+from typing import NamedTuple, NoReturn
+
+HOME = os.path.expanduser("~")
+ADD_REPO = ("set [dev] repos_dir to the folder your checkouts live in, or add [dev.repos.<alias>] path = \"...\", "
+            "in ~/.config/fleet/config.toml")
+LABEL_SEP = "__"
+import fleet_config  # noqa: E402
+
+
+def lockfile_commands():
+    """[(lockfile, argv)] in order: [setup] installs in the fleet config, shared with fleet new."""
+    return [(f, shlex.split(cmd)) for f, cmd in fleet_config.get("setup", "installs", [])]
+
+
+def default_tabs():
+    return fleet_config.get("layout", "tabs", ["shell", "agent"])
+
+
+@dataclass
+class Repo:
+    path: str
+    base: str
+
+
+class Result(NamedTuple):
+    status: int
+    stdout: str
+    stderr: str
+
+
+Repos = dict[str, Repo]
+Context = dict  # one entry of `herdr workspace list` that has a linked worktree
+
+
+# ---------------------------------------------------------------- process helpers
+
+def die(msg: str, code: int = 1) -> NoReturn:
+    print(f"dev: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run_capture(cmd: str, args: list[str], check: bool = True, cwd: str | None = None) -> Result:
+    try:
+        p = subprocess.run([cmd, *args], cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, errors="replace")
+        # killed by a signal or missing binary: Node reports status null, read as 1
+        result = Result(p.returncode if p.returncode >= 0 else 1, p.stdout or "", p.stderr or "")
+    except OSError:
+        result = Result(1, "", "")
+    if check and result.status != 0:
+        die((result.stderr or f"Command failed: {cmd} {' '.join(args)}").strip())
+    return result
+
+
+def run_inherit(cmd: str, args: list[str], cwd: str | None = None):
+    """Run attached to the terminal; exit with its status when it fails."""
+    sys.stdout.flush()
+    try:
+        rc = subprocess.run([cmd, *args], cwd=cwd).returncode
+    except OSError:
+        rc = 1
+    if rc != 0:
+        sys.exit(rc if rc > 0 else 1)
+
+
+def run_quiet(cmd: str, args: list[str], cwd: str | None = None) -> bool:
+    try:
+        return subprocess.run([cmd, *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0
+    except OSError:
+        return False
+
+
+def has_command(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def require_command(cmd: str):
+    if not has_command(cmd):
+        die(f"Missing required command: {cmd}")
+
+
+def run_fzf(options: list[str], prompt: str) -> str:
+    sys.stdout.flush()
+    p = subprocess.run(["fzf", "--prompt", prompt], input="\n".join(options), stdout=subprocess.PIPE, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def prompt_text(question: str) -> str:
+    try:
+        return input(question).strip()
+    except EOFError:
+        return ""
+
+
+def herdr_json(args: list[str]) -> dict:
+    result = run_capture("herdr", args)
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        die(f"Unexpected herdr output for 'herdr {' '.join(args)}': {result.stdout[:200]}")
+
+
+# ---------------------------------------------------------------- path helpers (Node semantics)
+
+def resolve(p: str) -> str:
+    """Node's path.resolve: absolute, normalised, no trailing slash, symlinks untouched."""
+    r = os.path.abspath(p)
+    return "/" + r.lstrip("/") if r.startswith("//") else r
+
+
+def same_path(left: str | None, right: str | None) -> bool:
+    return bool(left) and bool(right) and resolve(left) == resolve(right)
+
+
+def node_join(*parts: str) -> str:
+    """Node's path.join: normalises but keeps a trailing slash."""
+    joined = "/".join(p for p in parts if p)
+    if not joined:
+        return "."
+    out = os.path.normpath(joined)
+    out = "/" + out.lstrip("/") if out.startswith("//") else out
+    return out + "/" if joined.endswith("/") and out != "/" else out
+
+
+def expand_home(value: str) -> str:
+    return node_join(HOME, value[2:]) if value.startswith("~/") else value
+
+
+def collation_key(s: str):
+    """Approximates String.localeCompare (ICU root collation) for `dev repos` ordering:
+    punctuation < digits < letters, case-insensitive first, lowercase before uppercase on ties."""
+    punct = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
+    primary, tertiary = [], []
+    for ch in s:
+        if ch.isspace():
+            primary.append((0, 0, ch))
+        elif ch.isdigit():
+            primary.append((2, 0, ch))
+        elif ch.isalpha():
+            primary.append((3, 0, ch.lower()))
+        else:
+            primary.append((1, punct.index(ch) if ch in punct else len(punct), ch))
+        tertiary.append(1 if ch.isupper() else 0)
+    return primary, tertiary
+
+
+# ---------------------------------------------------------------- git helpers
+
+def git_top_level() -> str:
+    result = run_capture("git", ["rev-parse", "--show-toplevel"], check=False)
+    if result.status != 0:
+        die("Not inside a git repository.")
+    return result.stdout.strip()
+
+
+def require_inside_git_repo(command_name: str):
+    if run_capture("git", ["rev-parse", "--show-toplevel"], check=False).status != 0:
+        die(f"{command_name} must run inside a git repository.")
+
+
+def is_bare(repo_path: str) -> bool:
+    return run_capture("git", ["-C", repo_path, "rev-parse", "--is-bare-repository"],
+                       check=False).stdout.strip() == "true"
+
+
+def local_branch_exists(repo_path: str, branch: str) -> bool:
+    return run_capture("git", ["-C", repo_path, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                       check=False).status == 0
+
+
+def current_branch_name(repo_path: str) -> str:
+    return run_capture("git", ["-C", repo_path, "branch", "--show-current"], check=False).stdout.strip()
+
+
+def assert_clean(repo_path: str, message: str):
+    if run_capture("git", ["-C", repo_path, "status", "--porcelain"]).stdout.strip():
+        die(message)
+
+
+def is_dirty(checkout: str) -> bool:
+    return bool(run_capture("git", ["-C", checkout, "status", "--porcelain"], check=False).stdout.strip())
+
+
+def base_ref(repo: Repo) -> str:
+    return f"origin/{repo.base}"
+
+
+def fetch_base(alias: str, repo: Repo):
+    """Update the remote-tracking ref so new worktrees branch from a fresh origin/<base>. Unlike
+    refresh_canonical_repo this never touches the canonical checkout, so it works while an agent
+    has it dirty or on another branch."""
+    require_command("git")
+    run_inherit("git", ["-C", repo.path, "fetch", "origin", repo.base])
+
+
+def worktree_blocks(repo_path: str) -> list[str]:
+    return run_capture("git", ["-C", repo_path, "worktree", "list", "--porcelain"], check=False).stdout.split("\n\n")
+
+
+def worktree_for_branch(repo: Repo, branch: str) -> str:
+    for block in worktree_blocks(repo.path):
+        if f"\nbranch refs/heads/{branch}\n" in block or block.endswith(f"\nbranch refs/heads/{branch}"):
+            m = re.search(r"^worktree (.+)$", block, re.M)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def add_git_worktree(repo: Repo, branch: str, worktree_path: str, start: str = "", track: bool = False):
+    """Check out `branch` at worktree_path, creating it from `start` (default origin/<base>) when
+    it doesn't exist locally."""
+    require_command("git")
+    if local_branch_exists(repo.path, branch):
+        run_inherit("git", [*NO_HOOKS, "-C", repo.path, "worktree", "add", worktree_path, branch])
+    else:
+        run_inherit("git", [*NO_HOOKS, "-C", repo.path, "worktree", "add", *(["--track"] if track else []),
+                            "-b", branch, worktree_path, start or base_ref(repo)])
+
+
+def open_worktree(repo: Repo, worktree_path: str, label: str) -> str:
+    """herdr workspace for a worktree already on disk (`herdr worktree create` runs the hooks)."""
+    opened = herdr_json(["worktree", "open", "--cwd", repo.path, "--path", worktree_path, "--label", label,
+                         "--no-focus", "--json"])
+    return opened["result"]["workspace"]["workspace_id"]
+
+
+def origin_repo_name(repo_path: str) -> str:
+    remote = run_capture("git", ["-C", repo_path, "config", "--get", "remote.origin.url"], check=False).stdout.strip()
+    if not remote:
+        return ""
+    return re.split(r"[/:]", re.sub(r"\.git$", "", remote))[-1]
+
+
+# ---------------------------------------------------------------- repo registry
+
+def load_repos() -> Repos:
+    """The fleet config's [dev]: every git checkout directly in repos_dir (alias = folder name),
+    then [dev.repos.<alias>] path/base for repos elsewhere, another alias, or another base."""
+    cfg = fleet_config.load()["dev"]
+    repos = scan_repos_dir(expand_home(cfg["repos_dir"]))
+    for alias, r in cfg["repos"].items():
+        if not isinstance(r, dict) or not r.get("path"):
+            die(f"[dev.repos.{alias}] needs path = \"<folder of the checkout>\"")
+        path = expand_home(r["path"])
+        repos[alias] = Repo(path, r.get("base") or detect_default_branch(path))
+    if not repos:
+        missing = cfg["repos_dir"] and not os.path.isdir(expand_home(cfg["repos_dir"]))
+        die(f"No repos found: [dev] repos_dir {cfg['repos_dir']} doesn't exist" if missing
+            else f"No repos found: {ADD_REPO}")
+    return repos
+
+
+def scan_repos_dir(repos_dir: str) -> Repos:
+    """Every direct child with a .git DIRECTORY is a repo (alias = folder name). Linked
+    worktrees keep .git as a file, so <repo>-wt-<task> checkouts are excluded automatically."""
+    repos: Repos = {}
+    if not repos_dir or not os.path.exists(repos_dir):
+        return repos
+    with os.scandir(repos_dir) as it:
+        entries = sorted(it, key=lambda e: e.name)  # Node's readdir is strcmp-sorted
+    for entry in entries:
+        if not entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
+            continue
+        repo_path = node_join(repos_dir, entry.name)
+        if not os.path.isdir(os.path.join(repo_path, ".git")):
+            continue
+        repos[entry.name] = Repo(repo_path, detect_default_branch(repo_path))
+    return repos
+
+
+def detect_default_branch(repo_path: str) -> str:
+    """Reads origin's HEAD ref from disk (no git subprocess); falls back to main."""
+    try:
+        with open(os.path.join(repo_path, ".git", "refs", "remotes", "origin", "HEAD"), encoding="utf-8") as f:
+            m = re.search(r"refs/remotes/origin/(.+)\s*$", f.read())
+        if m:
+            return m.group(1).strip()
+    except OSError:
+        pass  # no origin HEAD recorded
+    return "main"
+
+
+def infer_current_repo_alias() -> str:
+    repos = load_repos()
+    current = git_top_level()
+    current_branch = current_branch_name(current)
+
+    for alias in repos:
+        if branch_task(current_branch, alias) is not None:
+            return alias
+
+    for alias, repo in repos.items():
+        if same_path(repo.path, current):
+            return alias
+
+    remote_name = origin_repo_name(current)
+    if remote_name and remote_name in repos:
+        return remote_name
+
+    die("Could not infer the current repo alias. Run from a configured repo or branch created by dev.")
+
+
+# ---------------------------------------------------------------- herdr contexts
+
+def list_contexts() -> list[Context]:
+    workspaces = herdr_json(["workspace", "list"])["result"]["workspaces"]
+    return [ws for ws in workspaces if (ws.get("worktree") or {}).get("is_linked_worktree")]
+
+
+def alias_for_repo_root(repo_root: str, repos: Repos) -> str:
+    for alias, repo in repos.items():
+        if same_path(repo.path, repo_root):
+            return alias
+    return ""
+
+
+def context_label(ctx: Context, repos: Repos) -> str:
+    alias = alias_for_repo_root(ctx["worktree"]["repo_root"], repos)
+    if not alias or ctx["label"].startswith(f"{alias}{LABEL_SEP}"):
+        return ctx["label"]
+    return f"{alias}{LABEL_SEP}{ctx['label']}"
+
+
+def find_context_by_label(label: str, repos: Repos) -> Context | None:
+    contexts = list_contexts()
+    return (next((c for c in contexts if context_label(c, repos) == label), None)
+            or next((c for c in contexts if c["label"] == label), None))
+
+
+def focus_context_by_label(label: str, repos: Repos):
+    ctx = find_context_by_label(label, repos)
+    if not ctx:
+        die(f"No context named '{label}'.")
+    focus_workspace(ctx["workspace_id"])
+
+
+def current_context() -> Context | None:
+    contexts = list_contexts()
+    ws_id = os.environ.get("HERDR_WORKSPACE_ID")
+    if ws_id:
+        match = next((c for c in contexts if c["workspace_id"] == ws_id), None)
+        if match:
+            return match
+    try:
+        top_level = git_top_level()  # outside a repo this exits (as in Node), it does not return None
+        return next((c for c in contexts if same_path(c["worktree"]["checkout_path"], top_level)), None)
+    except Exception:
+        return None
+
+
+def focus_workspace(workspace_id: str):
+    if os.environ.get("DEV_NO_FOCUS"):
+        return  # orchestration: create contexts without stealing the user's focus
+    run_capture("herdr", ["workspace", "focus", workspace_id])
+
+
+def ensure_tabs(workspace_id: str, default_cwd: str, extra_tabs: list[tuple[str, str]] | None = None,
+                pane_name: str = ""):
+    """Rename the first tab `shell`, then add any missing extra tabs (cross siblings) and `agent`."""
+    tabs = herdr_json(["tab", "list", "--workspace", workspace_id])["result"]["tabs"]
+    if not tabs:
+        return
+
+    labels = {tab.get("label") for tab in tabs}
+    if "shell" not in labels:
+        run_quiet("herdr", ["tab", "rename", tabs[0]["tab_id"], "shell"])
+
+    wanted = [*(extra_tabs or []), *((name, default_cwd) for name in default_tabs() if name != "shell")]
+    for name, cwd in wanted:
+        if name in labels:
+            continue
+        created = run_capture("herdr", ["tab", "create", "--workspace", workspace_id, "--label", name,
+                                        "--cwd", cwd, "--no-focus"], check=False)
+        # Name the agent pane after the context so the agents panel reads the task.
+        if name == "agent" and pane_name and created.status == 0:
+            try:
+                pane_id = json.loads(created.stdout)["result"]["root_pane"]["pane_id"]
+                run_quiet("herdr", ["pane", "rename", pane_id, pane_name])
+            except Exception:
+                pass  # cosmetic
+
+
+def list_agents() -> list[dict]:
+    return herdr_json(["agent", "list"])["result"]["agents"]
+
+
+def list_agent_cwds() -> list[str]:
+    try:
+        return [cwd for a in list_agents() for cwd in (a.get("cwd"), a.get("foreground_cwd")) if cwd]
+    except Exception:
+        return []
+
+
+def list_agent_workspaces() -> list[str]:
+    try:
+        return [a.get("workspace_id") for a in list_agents()]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------- process detection
+
+def workspace_pids(workspace_id: str) -> set:
+    """Shell pids of every pane in a herdr workspace; processes descending from them are owned
+    by the workspace and are not "in use" from its own point of view."""
+    pids: set = set()
+    try:
+        for p in herdr_json(["pane", "list", "--workspace", workspace_id])["result"]["panes"]:
+            info = run_capture("herdr", ["pane", "process-info", "--pane", p["pane_id"]], check=False)
+            try:
+                pids.add(json.loads(info.stdout)["result"]["process_info"]["shell_pid"])
+            except Exception:
+                pass
+    except Exception:
+        pass  # no herdr
+    return pids
+
+
+def in_use_by_process(checkout: str, ignore_ancestors: set | None = None) -> bool:
+    """Worktree is in use if any running process has its cwd inside it (dev servers, shells,
+    agents herdr doesn't know about). Linux via /proc, macOS via lsof."""
+    ignore = ignore_ancestors or set()
+    root = resolve(checkout)
+    if sys.platform.startswith("linux"):
+        def ppid(pid: int) -> int:
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    return int(f.read().split(") ")[1].split(" ")[1])
+            except Exception:
+                return 0
+
+        def owned_by_ignored(pid: int) -> bool:
+            cur = pid
+            for _ in range(64):
+                if cur <= 1:
+                    break
+                if cur in ignore:
+                    return True
+                cur = ppid(cur)
+            return False
+
+        for name in os.listdir("/proc"):
+            if not name.isdigit() or int(name) == os.getpid():
+                continue
+            try:
+                cwd = os.readlink(f"/proc/{name}/cwd")
+            except OSError:
+                continue
+            if (cwd == root or cwd.startswith(f"{root}{os.sep}")) and not owned_by_ignored(int(name)):
+                return True
+        return False
+    out = run_capture("lsof", ["-a", "-d", "cwd", "-Fn", "+D", root], check=False).stdout
+    return any(line.startswith("n") and len(line) > 1 for line in out.split("\n"))
+
+
+# ---------------------------------------------------------------- merged / PR state
+
+def branch_is_merged(repo: Repo, branch: str, ask_github: bool = False, pr_index: dict | None = None) -> bool:
+    """A branch is finished when origin/<base> already contains it (merge or rebase) or, with
+    ask_github, when its PR was merged (squash merges leave no ancestry, so git alone cannot tell)."""
+    if not branch or branch == repo.base:
+        return False
+    ancestor = run_capture("git", ["-C", repo.path, "merge-base", "--is-ancestor", branch, base_ref(repo)],
+                           check=False)
+    if ancestor.status == 0:
+        return True
+    if not ask_github or not has_command("gh"):
+        return False
+    index = pr_index if pr_index is not None else load_pr_index(repo)
+    # Only MERGED counts: a closed-but-unmerged PR may still hold unpushed work.
+    return index.get(branch) == "MERGED"
+
+
+def load_pr_index(repo: Repo) -> dict[str, str]:
+    """One GitHub call per repo: head branch -> PR state for recent PRs."""
+    index: dict[str, str] = {}
+    result = run_capture("gh", ["pr", "list", "--state", "all", "--limit", "300", "--json", "headRefName,state"],
+                         check=False, cwd=repo.path)
+    if result.status != 0:
+        return index
+    try:
+        for pr in json.loads(result.stdout):
+            # Newest first; keep the first (latest) state seen per branch.
+            index.setdefault(pr["headRefName"], pr["state"])
+    except Exception:
+        pass
+    return index
+
+
+# ---------------------------------------------------------------- bootstrap
+
+def seed_worktree(alias: str, worktree_path: str) -> int:
+    """Copy machine-local, gitignored files (.env, local config) into a fresh worktree from
+    ~/.config/dev/seed/<alias>/ (mirrors the repo layout). Existing files are never overwritten."""
+    seed_dir = os.path.join(HOME, ".config", "dev", "seed", alias)
+    if not alias or not os.path.exists(seed_dir):
+        return 0
+    n = 0
+
+    def walk(d: str):
+        nonlocal n
+        with os.scandir(d) as it:
+            entries = sorted(it, key=lambda e: e.name)
+        for e in entries:
+            src = os.path.join(d, e.name)
+            dst = os.path.join(worktree_path, os.path.relpath(src, seed_dir))
+            if e.is_dir(follow_symlinks=False):
+                walk(src)
+                continue
+            if os.path.exists(dst):
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy(src, dst)
+            n += 1
+
+    walk(seed_dir)
+    if n:
+        print(f"seed: copied {n} file(s) from {seed_dir}")
+    return n
+
+
+def bootstrap_worktree(worktree_path: str, alias: str = ""):
+    resolved = resolve(worktree_path)
+    seed_worktree(alias, resolved)
+
+    if os.path.exists(os.path.join(resolved, ".par.yaml")):
+        print(f"bootstrap: {resolved} has .par.yaml, skipping generic bootstrap")
+        return
+
+    # `fleet new` runs the install in the shell tab itself so the agent can start meanwhile.
+    if os.environ.get("DEV_SKIP_INSTALL") == "1":
+        print("bootstrap: DEV_SKIP_INSTALL=1, leaving the install to the caller")
+        return
+
+    for file, cmd in lockfile_commands():
+        if os.path.exists(os.path.join(resolved, file)):
+            print(f"bootstrap: found {file}, running {' '.join(cmd)}")
+            sys.stdout.flush()
+            try:
+                status = str(subprocess.run(cmd, cwd=resolved).returncode)
+            except OSError:
+                status = "null"  # Node's spawnSync status for a missing binary
+            if status != "0":
+                print(f"bootstrap: {' '.join(cmd)} failed (exit {status})", file=sys.stderr)
+            return
+
+    print(f"bootstrap: no lockfile found in {resolved}, nothing to do")
+
+
+# ---------------------------------------------------------------- context creation
+
+def create_or_open_single_repo_context(alias: str, task: str, repo: Repo):
+    branch = branch_name(alias, task)
+    worktree_path = worktree_path_of(repo.path, alias, task)
+
+    existing = next((c for c in list_contexts() if same_path(c["worktree"]["checkout_path"], worktree_path)), None)
+    if existing:
+        focus_workspace(existing["workspace_id"])
+        return
+
+    if os.path.exists(worktree_path):
+        workspace_id = open_worktree(repo, worktree_path, task)
+        ensure_tabs(workspace_id, worktree_path, [], branch)
+        focus_workspace(workspace_id)
+        return
+
+    fetch_base(alias, repo)
+    add_git_worktree(repo, branch, worktree_path)
+    workspace_id = open_worktree(repo, worktree_path, task)
+
+    bootstrap_worktree(worktree_path, alias)
+    ensure_tabs(workspace_id, worktree_path, [], branch)
+    focus_workspace(workspace_id)
+
+
+def normalize_task(task: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", task.strip().lower())
+    normalized = re.sub(r"^-|-$", "", re.sub(r"-+", "-", normalized))
+    if not normalized:
+        die("Task cannot be empty.")
+    return normalized
+
+
+# ---------------------------------------------------------------- commands
+
+def print_help():
+    print(f"""dev — task-first wrapper around herdr worktrees + gritty
+
+Usage:
+  dev pick
+  dev <repo> [task]
+  dev branch <task>
+  dev cross <task> <repo> [repo...]
+  dev ls
+  dev repos [--json]
+  dev sync
+  dev refresh [repo]
+  dev prune [--dry-run] [--all]
+  dev bootstrap
+  dev save
+  dev pr
+  dev pr-checkout <number> [--repo alias]   (alias: prco)
+  dev done [label] [--force] [--keep-branch]
+
+Config:
+  Seed files: ~/.config/dev/seed/<alias>/ mirrors the repo; its files are copied
+  into every new worktree (for .env and other gitignored local config).
+  DEV_NO_FOCUS=1 creates contexts without focusing them (orchestration).
+  DEV_SKIP_INSTALL=1 seeds but skips the lockfile install (fleet new runs it in the shell tab).
+
+  Repos (~/.config/fleet/config.toml): every git checkout in [dev] repos_dir,
+  alias = folder name; [dev.repos.<alias>] path = "...", base = "main" adds
+  or overrides one. `fleet config show dev` prints them.
+
+Labels use repo{LABEL_SEP}task format (e.g. rain{LABEL_SEP}fix-auth); cross contexts use the bare task.
+Worktrees live beside the repo as <repo>-wt-<task>; PR reviews as <repo>-wt-pr-<n>.
+Canonical clones are bare (no working tree): all work happens in worktrees.
+'dev done' deletes the branch once it is merged; 'dev prune' reconciles
+worktrees, branches, and herdr workspaces (fast path runs on every dashboard,
+'--all' also asks GitHub which PRs merged).
+
+(The dev shell function falls back to 'cd $DEV_HOME/<arg>' for anything
+that is not a subcommand or configured repo alias.)
+""")
+
+
+def cmd_dashboard():
+    require_command("herdr")
+
+    repos = load_repos()
+    quiet_prune(repos)
+    contexts = list_contexts()
+
+    if not contexts:
+        print("No active contexts.")
+        open_repo_from_dashboard(repos)
+        return
+
+    if has_command("fzf"):
+        options = [f"context\t{context_label(c, repos)}" for c in contexts] + [f"repo\t{a}" for a in sorted(repos)]
+        picked = run_fzf(options, "dev> ")
+        if not picked:
+            return
+        kind, _, value = picked.partition("\t")
+        if kind == "context":
+            focus_context_by_label(value, repos)
+            return
+        if kind == "repo":
+            cmd_repo(value, [])
+            return
+
+    cmd_ls()
+    print("\nRun `dev <repo>` to open or create a task.")
+
+
+def open_repo_from_dashboard(repos: Repos):
+    aliases = sorted(repos)
+    if not aliases:
+        die(f"No repos configured: {ADD_REPO}", 1)
+
+    if has_command("fzf"):
+        picked = run_fzf(aliases, "repo> ")
+        if picked:
+            cmd_repo(picked, [])
+        return
+
+    print("Configured repos:")
+    for alias in aliases:
+        print(f"  {alias}")
+    print("\nRun `dev <repo>` to start.")
+
+
+def cmd_repo(alias: str, rest: list[str]):
+    require_command("herdr")
+
+    repos = load_repos()
+    repo = repos.get(alias)
+    if not repo:
+        die(f"Unknown repo '{alias}': {ADD_REPO}")
+
+    if rest and rest[0]:
+        create_or_open_single_repo_context(alias, normalize_task(rest[0]), repo)
+        return
+
+    active = [c for c in list_contexts() if same_path(c["worktree"]["repo_root"], repo.path)]
+
+    if len(active) == 1:
+        focus_workspace(active[0]["workspace_id"])
+        return
+
+    if len(active) > 1 and has_command("fzf"):
+        by_label = {context_label(c, repos): c for c in active}
+        picked = run_fzf([*by_label, "[new task]"], f"{alias}> ")
+        if not picked:
+            return
+        if picked != "[new task]":
+            focus_workspace(by_label[picked]["workspace_id"])
+            return
+    elif len(active) > 1:
+        print(f"Active {alias} contexts:")
+        for c in active:
+            print(f"  {context_label(c, repos)}")
+
+    task = prompt_text(f"Task for {alias}: ")
+    create_or_open_single_repo_context(alias, normalize_task(task), repo)
+
+
+def cmd_branch(rest: list[str]):
+    if not rest:
+        die("Usage: dev branch <task>")
+    alias = infer_current_repo_alias()
+    repos = load_repos()
+    create_or_open_single_repo_context(alias, normalize_task(rest[0]), repos[alias])
+
+
+def cmd_cross(rest: list[str]):
+    require_command("herdr")
+
+    if len(rest) < 2:
+        die("Usage: dev cross <task> <repo> [repo...]")
+
+    task = normalize_task(rest[0])
+    repos = load_repos()
+    selected: list[tuple[str, Repo]] = []
+    for alias in dict.fromkeys(rest[1:]):
+        if alias not in repos:
+            die(f"Unknown repo '{alias}': {ADD_REPO}")
+        selected.append((alias, repos[alias]))
+
+    existing = next((c for c in list_contexts() if c["label"] == task), None)
+    if existing:
+        focus_workspace(existing["workspace_id"])
+        return
+
+    for alias, repo in selected:
+        fetch_base(alias, repo)
+
+    (_, primary), others = selected[0], selected[1:]
+
+    aliases = {id(r): a for a, r in selected}
+
+    def worktree_path_for(repo: Repo) -> str:
+        return worktree_path_of(repo.path, aliases[id(repo)], task)
+
+    add_git_worktree(primary, task, worktree_path_for(primary))
+    workspace_id = open_worktree(primary, worktree_path_for(primary), task)
+
+    for _, repo in others:
+        add_git_worktree(repo, task, worktree_path_for(repo))
+
+    for alias, repo in selected:
+        bootstrap_worktree(worktree_path_for(repo), alias)
+
+    ensure_tabs(workspace_id, worktree_path_for(primary),
+                [(alias, worktree_path_for(repo)) for alias, repo in others], task)
+    focus_workspace(workspace_id)
+
+
+def cmd_pr_checkout(rest: list[str]):
+    """Review a PR in its own worktree instead of `gh pr checkout` (which would switch whatever
+    checkout the caller happens to be in, usually canonical)."""
+    require_command("herdr")
+    require_command("gh")
+    require_command("git")
+
+    number = next((a for a in rest if re.fullmatch(r"[0-9]+", a)), None)
+    if not number:
+        die("Usage: dev pr-checkout <number> [--repo alias]")
+    repos = load_repos()
+    if "--repo" in rest:
+        i = rest.index("--repo")
+        alias = rest[i + 1] if i + 1 < len(rest) else ""
+    else:
+        alias = infer_current_repo_alias()
+    repo = repos.get(alias)
+    if not repo:
+        die(f"Unknown repo '{alias}'.")
+
+    view = run_capture("gh", ["pr", "view", number, "--json", "headRefName,headRepositoryOwner,isCrossRepository"],
+                       cwd=repo.path)
+    pr = json.loads(view.stdout)
+    if pr.get("isCrossRepository"):
+        die(f"PR #{number} comes from a fork; review it manually.")
+    branch = pr["headRefName"]
+    worktree_path = pr_worktree_path(repo.path, alias, number)
+    label = f"pr-{number}"
+
+    existing = next((c for c in list_contexts() if same_path(c["worktree"]["checkout_path"], worktree_path)), None)
+    if existing:
+        focus_workspace(existing["workspace_id"])
+        return
+
+    # The PR branch may already be checked out as the author's own context.
+    checked_out_at = worktree_for_branch(repo, branch)
+    if checked_out_at:
+        ctx = next((c for c in list_contexts() if same_path(c["worktree"]["checkout_path"], checked_out_at)), None)
+        if ctx:
+            print(f"dev: PR #{number} branch {branch} is already open as {ctx['label']}")
+            focus_workspace(ctx["workspace_id"])
+            return
+        die(f"Branch {branch} is checked out at {checked_out_at}; open that instead.")
+
+    run_inherit("git", ["-C", repo.path, "fetch", "origin", branch])
+    add_git_worktree(repo, branch, worktree_path, start=f"origin/{branch}", track=True)
+    workspace_id = open_worktree(repo, worktree_path, label)
+    bootstrap_worktree(worktree_path, alias)
+    ensure_tabs(workspace_id, worktree_path, [], f"{alias}{LABEL_SEP}{label}")
+    focus_workspace(workspace_id)
+    print(worktree_path)
+
+
+def cmd_done(rest: list[str]):
+    require_command("herdr")
+
+    force = "--force" in rest or "-f" in rest
+    keep_branch = "--keep-branch" in rest
+    label_arg = next((a for a in rest if not a.startswith("-")), None)
+    repos = load_repos()
+
+    ctx = find_context_by_label(label_arg, repos) if label_arg else current_context()
+    if not ctx:
+        die("No current context found. Pass a label: dev done <label>")
+
+    task = ctx["label"]
+    primary_path = ctx["worktree"]["checkout_path"]
+    branch = current_branch_name(primary_path)
+    is_cross = not any(branch_task(branch, a) is not None for a in repos)
+
+    # Cross contexts have sibling checkouts in every registered repo on the
+    # same bare-task branch; single-repo branches follow the branch template
+    # (<repo>__<task> by default) so they can never collide with another context's checkouts.
+    sibling_repos = [(r, worktree_path_of(r.path, a, task)) for a, r in repos.items()] if is_cross else []
+    sibling_repos = [(r, c) for r, c in sibling_repos
+                     if not same_path(c, primary_path) and os.path.exists(c) and current_branch_name(c) == branch]
+    siblings = [c for _, c in sibling_repos]
+
+    if not force:
+        for checkout in [primary_path, *siblings]:
+            if run_capture("git", ["-C", checkout, "status", "--porcelain"], check=False).stdout.strip():
+                die(f"Uncommitted changes in {checkout} — commit/push them, or 'dev done --force' to discard.")
+            if not same_path(checkout, os.getcwd()) and in_use_by_process(checkout, workspace_pids(ctx["workspace_id"])):
+                die(f"A process is still running in {checkout} — stop it, or 'dev done --force'.")
+
+    for sibling_repo, checkout in sibling_repos:
+        repo_root = sibling_repo.path
+        print(f"dev: removing {checkout} (branch {branch} kept)")
+        run_inherit("git", ["-C", repo_root, "worktree", "remove", *(["--force"] if force else []), checkout])
+
+    # Focus the parent repo workspace first: removing the workspace kills the
+    # pane this command runs in, so it must be the last thing we do.
+    inside_target = os.environ.get("HERDR_WORKSPACE_ID") == ctx["workspace_id"]
+    if inside_target:
+        info = herdr_json(["worktree", "list", "--workspace", ctx["workspace_id"], "--json"])
+        parent = ((info.get("result") or {}).get("source") or {}).get("source_workspace_id")
+        if parent:
+            run_quiet("herdr", ["workspace", "focus", parent])
+
+    repo_root = ctx["worktree"]["repo_root"]
+    repo = repos.get(alias_for_repo_root(repo_root, repos)) or Repo(repo_root, "main")
+    merged = not keep_branch and branch_is_merged(repo, branch, ask_github=True)
+    print(f"dev: removing {primary_path} (branch {branch} {'merged, deleting' if merged else 'kept'})")
+    run_capture("herdr", ["worktree", "remove", "--workspace", ctx["workspace_id"], *(["--force"] if force else [])])
+    if merged:
+        run_quiet("git", ["-C", repo.path, "branch", "-D", branch])
+
+
+def cmd_prune(rest: list[str]):
+    """Worktrees leak whenever a herdr workspace dies without `dev done` (closed in the herdr UI,
+    session reset, reboot): the workspace list is dev's only record of live contexts, so the
+    checkout stays on disk with nothing left pointing at it. Reconcile from git's own worktree
+    registry instead: any <repo>-wt-* checkout that no live context accounts for is stale. Clean
+    ones are removed (branch kept, same contract as `dev done`); dirty ones are only reported —
+    never deleted."""
+    require_command("git")
+    require_command("herdr")
+
+    dry_run = "--dry-run" in rest or "-n" in rest
+    ask_github = "--all" in rest
+    s = prune(load_repos(), dry_run=dry_run, ask_github=ask_github, verbose=True)
+    # NB: the double space before "removed" when not a dry run is inherited from the Node output.
+    print(f"prune: {s['worktrees']} worktree{'' if s['worktrees'] == 1 else 's'}, "
+          f"{s['branches']} branch{'' if s['branches'] == 1 else 'es'}, "
+          f"{s['workspaces']} workspace{'' if s['workspaces'] == 1 else 's'} "
+          f"{'would be' if dry_run else ''} removed; {s['skipped']} dirty skipped")
+
+
+def quiet_prune(repos: Repos):
+    """Fast reconcile used by the dashboard: no GitHub calls, never noisy."""
+    try:
+        s = prune(repos, dry_run=False, ask_github=False, verbose=False)
+        if s["worktrees"] + s["branches"] + s["workspaces"] > 0:
+            print(f"dev: pruned {s['worktrees']} worktrees, {s['branches']} branches, {s['workspaces']} workspaces")
+    except Exception:
+        pass  # never block the dashboard
+
+
+def prune(repos: Repos, dry_run: bool, ask_github: bool, verbose: bool) -> dict[str, int]:
+    """Reconcile three registries that drift apart: git worktrees on disk, local branches, and
+    herdr workspaces.
+     1. Stale worktrees (no live context) that are clean are removed.
+     2. dev-created branches (<alias>__* or pr-*) not checked out anywhere and merged/closed
+        are deleted.
+     3. herdr workspaces whose checkout no longer exists are closed. Workspaces with no agent
+        whose branch is merged are closed and their worktree removed (only when clean).
+    Dirty checkouts are reported and left alone. Workspaces with a live agent are never touched."""
+    summary = {"worktrees": 0, "branches": 0, "workspaces": 0, "skipped": 0}
+
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    contexts = list_contexts()
+    live_workspaces = set(list_agent_workspaces())
+    pr_indexes: dict[str, dict[str, str]] = {}
+
+    def pr_index_for(repo: Repo) -> dict[str, str] | None:
+        if not ask_github:
+            return None
+        if repo.path not in pr_indexes:
+            pr_indexes[repo.path] = load_pr_index(repo)
+        return pr_indexes[repo.path]
+
+    # 3a. Workspaces pointing at a checkout that is gone.
+    for ctx in contexts:
+        if ctx["workspace_id"] in live_workspaces:
+            continue
+        if not os.path.exists(ctx["worktree"]["checkout_path"]):
+            log(f"prune: closing workspace {ctx['label']} (checkout missing)")
+            if not dry_run:
+                run_quiet("herdr", ["workspace", "close", ctx["workspace_id"]])
+            summary["workspaces"] += 1
+
+    # 3b. Idle workspaces whose branch is finished.
+    for ctx in contexts:
+        if ctx["workspace_id"] in live_workspaces or not os.path.exists(ctx["worktree"]["checkout_path"]):
+            continue
+        repo = repos.get(alias_for_repo_root(ctx["worktree"]["repo_root"], repos))
+        if not repo:
+            continue
+        checkout = ctx["worktree"]["checkout_path"]
+        branch = current_branch_name(checkout)
+        if not branch_is_merged(repo, branch, ask_github=ask_github, pr_index=pr_index_for(repo)):
+            continue
+        if is_dirty(checkout) or in_use_by_process(checkout):
+            log(f"prune: skipping {checkout} (merged but dirty or in use)")
+            summary["skipped"] += 1
+            continue
+        log(f"prune: closing workspace {ctx['label']} and removing {checkout} (branch {branch} merged)")
+        if not dry_run:
+            run_capture("herdr", ["worktree", "remove", "--workspace", ctx["workspace_id"]], check=False)
+            if os.path.exists(checkout):
+                run_quiet("git", ["-C", repo.path, "worktree", "remove", checkout])
+            run_quiet("git", ["-C", repo.path, "branch", "-D", branch])
+        summary["workspaces"] += 1
+        summary["worktrees"] += 1
+        summary["branches"] += 1
+
+    # 1. Stale worktrees on disk.
+    for repo, wt_path, dirty in find_stale_worktrees(repos, list_contexts()):
+        if dirty:
+            log(f"prune: skipping {wt_path} (uncommitted changes)")
+            summary["skipped"] += 1
+            continue
+        if in_use_by_process(wt_path):
+            log(f"prune: skipping {wt_path} (a process is running in it)")
+            summary["skipped"] += 1
+            continue
+        branch = current_branch_name(wt_path)
+        log(f"prune: removing {wt_path}")
+        if not dry_run:
+            run_quiet("git", ["-C", repo.path, "worktree", "remove", wt_path])
+        summary["worktrees"] += 1
+        if branch and branch_is_merged(repo, branch, ask_github=ask_github, pr_index=pr_index_for(repo)):
+            log(f"prune: deleting merged branch {branch}")
+            if not dry_run:
+                run_quiet("git", ["-C", repo.path, "branch", "-D", branch])
+            summary["branches"] += 1
+
+    # 2. Orphan dev branches (not checked out anywhere) that are finished.
+    for alias, repo in repos.items():
+        porcelain = run_capture("git", ["-C", repo.path, "worktree", "list", "--porcelain"], check=False).stdout
+        checked_out = {line[len("branch refs/heads/"):] for line in porcelain.split("\n")
+                       if line.startswith("branch refs/heads/")}
+        branches = [b for b in run_capture("git", ["-C", repo.path, "for-each-ref", "--format=%(refname:short)",
+                                                   "refs/heads/"], check=False).stdout.split("\n") if b]
+        for branch in branches:
+            owned = branch_task(branch, alias) is not None or branch.startswith("pr-")
+            if not owned or branch in checked_out or branch == repo.base:
+                continue
+            if not branch_is_merged(repo, branch, ask_github=ask_github, pr_index=pr_index_for(repo)):
+                continue
+            log(f"prune: deleting merged branch {alias}:{branch}")
+            if not dry_run:
+                run_quiet("git", ["-C", repo.path, "branch", "-D", branch])
+            summary["branches"] += 1
+
+    return summary
+
+
+def find_stale_worktrees(repos: Repos, contexts: list[Context]) -> list[tuple[Repo, str, bool]]:
+    """(repo, path, dirty) for every <repo>-wt-* worktree nothing live accounts for.
+
+    A worktree is live if a context checks it out directly, or if it is a sibling checkout of a
+    live cross context (cross siblings share the bare task branch but have no workspace of
+    their own — cmd_done has the same special case)."""
+    tracked_paths = {resolve(c["worktree"]["checkout_path"]) for c in contexts}
+    live_labels = {c["label"] for c in contexts}
+    # Any checkout a live agent is working in is live, even if no dev context
+    # tracks it (e.g. a workspace created by hand pointing at a worktree).
+    agent_cwds = [resolve(cwd) for cwd in list_agent_cwds()]
+
+    def used_by_agent(wt_path: str) -> bool:
+        return any(cwd == wt_path or cwd.startswith(f"{wt_path}{os.sep}") for cwd in agent_cwds)
+
+    stale = []
+    for alias, repo in repos.items():
+        run_quiet("git", ["-C", repo.path, "worktree", "prune"])
+        for block in worktree_blocks(repo.path):
+            m = re.search(r"^worktree (.+)$", block, re.M)
+            if not m:
+                continue
+            wt_path = m.group(1)
+            if not dev_owned(wt_path, repo.path, alias):
+                continue  # canonical checkout, a spare or review checkout, or not created by dev
+            if resolve(wt_path) in tracked_paths or used_by_agent(resolve(wt_path)):
+                continue
+            branch = current_branch_name(wt_path)
+            if branch and branch_task(branch, alias) is None and branch in live_labels:
+                continue  # sibling of a live cross context
+            stale.append((repo, wt_path, is_dirty(wt_path)))
+    return stale
+
+
+def cmd_refresh(rest: list[str]):
+    repos = load_repos()
+    alias = rest[0] if rest and rest[0] else infer_current_repo_alias()
+    repo = repos.get(alias)
+    if not repo:
+        die(f"Unknown repo '{alias}': {ADD_REPO}")
+    refresh_canonical_repo(alias, repo)
+
+
+def refresh_canonical_repo(alias: str, repo: Repo):
+    """Full canonical refresh (clean + on base + pulled). Only `dev refresh` needs this; context
+    creation branches from origin/<base> and skips it entirely."""
+    require_command("git")
+
+    if is_bare(repo.path):
+        # Bare canonical: no working tree to switch; just move the base ref.
+        run_inherit("git", ["-C", repo.path, "fetch", "origin", f"{repo.base}:{repo.base}"])
+        return
+
+    assert_clean(repo.path, f"Canonical clone {alias} is dirty. Clean it before branching from {repo.base}.")
+
+    run_inherit("git", ["-C", repo.path, "fetch", "origin", repo.base])
+
+    if not local_branch_exists(repo.path, repo.base):
+        run_inherit("git", ["-C", repo.path, "switch", "--create", repo.base, "--track", f"origin/{repo.base}"])
+    elif current_branch_name(repo.path) != repo.base:
+        run_inherit("git", ["-C", repo.path, "switch", repo.base])
+
+    run_inherit("git", ["-C", repo.path, "pull", "--ff-only", "origin", repo.base])
+
+
+def cmd_sync():
+    require_inside_git_repo("dev sync")
+
+    repos = load_repos()
+    alias = infer_current_repo_alias()
+    repo = repos.get(alias)
+    if not repo:
+        die(f"Unknown repo '{alias}': {ADD_REPO}")
+
+    repo_root = git_top_level()
+    assert_clean(repo_root, "Commit or stash changes before dev sync.")
+    require_command("git")
+
+    run_inherit("git", ["-C", repo_root, "fetch", "origin", repo.base])
+
+    current = current_branch_name(repo_root)
+    if not current:
+        die("Detached HEAD. Checkout a branch before running dev sync.")
+
+    if current == repo.base:
+        run_inherit("git", ["-C", repo_root, "pull", "--ff-only", "origin", repo.base])
+        return
+
+    run_inherit("git", ["-C", repo_root, "rebase", f"origin/{repo.base}"])
+
+
+def cmd_bootstrap():
+    require_inside_git_repo("dev bootstrap")
+    alias = ""
+    try:
+        # Seeding is optional, but (as in Node) an unknown repo exits here rather than
+        # falling through: infer_current_repo_alias dies instead of raising.
+        alias = infer_current_repo_alias()
+    except Exception:
+        pass
+    bootstrap_worktree(git_top_level(), alias)
+
+
+def cmd_ls():
+    repos = load_repos()
+    contexts = list_contexts()
+    if not contexts:
+        print("No active contexts.")
+
+    for ctx in contexts:
+        print(" ".join([context_label(ctx, repos).ljust(40), (ctx.get("agent_status") or "unknown").ljust(8),
+                        ctx["worktree"]["checkout_path"]]))
+
+    stale = find_stale_worktrees(repos, contexts)
+    if stale:
+        print(f"\ndev: {len(stale)} stale worktree{'' if len(stale) == 1 else 's'} on disk — "
+              "run 'dev prune' to clean up.")
+
+
+def cmd_repos(rest: list[str]):
+    entries = sorted(load_repos().items(), key=lambda kv: collation_key(kv[0]))
+    if "--json" in rest:
+        print(json.dumps({"repos": [{"alias": a, "path": r.path, "defaultBranch": r.base} for a, r in entries]},
+                         separators=(",", ":"), ensure_ascii=False))
+        return
+    for alias, repo in entries:
+        print(f"{alias.ljust(40)} {repo.base.ljust(8)} {repo.path}")
+
+
+def main(argv: list[str]):
+    if any(a in ("-h", "--help", "help") for a in argv):
+        print_help()
+        return
+    if not argv:
+        cmd_dashboard()
+        return
+
+    command, rest = argv[0], argv[1:]
+    if command in ("help", "--help", "-h"):
+        print_help()
+    elif command == "--knows":
+        # used by the zsh `dev` wrapper: is this argument a repo alias?
+        sys.exit(0 if rest and rest[0] in load_repos() else 1)
+    elif command == "pick":
+        cmd_dashboard()
+    elif command == "ls":
+        cmd_ls()
+    elif command == "repos":
+        cmd_repos(rest)
+    elif command == "branch":
+        cmd_branch(rest)
+    elif command == "cross":
+        cmd_cross(rest)
+    elif command == "done":
+        cmd_done(rest)
+    elif command == "refresh":
+        cmd_refresh(rest)
+    elif command == "prune":
+        cmd_prune(rest)
+    elif command == "save":
+        require_inside_git_repo("dev save")
+        if not has_command("gritty"):
+            die("dev save writes the commit message with gritty, which isn't installed: use `git commit`")
+        run_inherit("gritty", ["commit", "--accept"])
+    elif command in ("pr-checkout", "prco"):
+        cmd_pr_checkout(rest)
+    elif command == "pr":
+        require_inside_git_repo("dev pr")
+        if has_command("gritty"):
+            run_inherit("gritty", ["pr", "--accept"])
+        else:
+            require_command("gh")
+            run_inherit("gh", ["pr", "create", "--fill"])
+        if has_command("gh"):
+            run_inherit("gh", ["pr", "checks"])
+    elif command == "bootstrap":
+        cmd_bootstrap()
+    elif command == "sync":
+        cmd_sync()
+    else:
+        cmd_repo(command, rest)
+
+
+if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)  # keep our lines ordered with child output
+    try:
+        main(sys.argv[1:])
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:  # Node's main().catch: one line, no stack
+        die(str(e) or type(e).__name__)

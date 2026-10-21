@@ -1,0 +1,299 @@
+{
+ "calls": {
+  "deploy:ddd567b846b676db02f2c2e88c612ee337948944": [
+   "deployed",
+   "word-1"
+  ],
+  "files": [
+   "src/f0",
+   "src/f1",
+   "src/f2",
+   "src/f3",
+   "src/f4",
+   "src/f5",
+   "src/f6"
+  ],
+  "prev": {
+   "head": "b5dbc4aeb9ff647f1bdd1382f3a80ffaa6957e55",
+   "review": {
+    "critical_impact": false,
+    "findings_by_round": [
+     1
+    ],
+    "present": true,
+    "provider": "greptile",
+    "retag_pending": false,
+    "retag_unanswered": false,
+    "reviewed_head": false,
+    "reviewed_sha": "31aff1b26338ed7708b61dbccd12e3509f539852",
+    "rounds": 0,
+    "score": 4
+   }
+  }
+ },
+ "expected": {
+  "act": null,
+  "detail": "word-1",
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": null,
+  "next": "done: merged and deployed. Tell the user in one line and stop. Never run or offer `dev done`: closing the context is the user's.",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "deployed",
+  "tier": null
+ },
+ "now": "2026-10-19T10:48:55.133759+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": null,
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 7,
+  "comments": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "greptile_confidence_score:4\nConfidence Score: 4/5\nLast reviewed commit: https://github.com/acme/app/commit/31aff1b26338ed7708b61dbccd12e3509f539852\nalt=\"P1\"",
+     "createdAt": "2026-10-16T13:53:43Z",
+     "updatedAt": "2026-10-16T13:53:52Z",
+     "url": "https://example.invalid/url-3"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "<!-- fleet-self-review sha=b5dbc4aeb9ff647f1bdd1382f3a80ffaa6957e55 -->",
+     "createdAt": "2026-10-16T13:56:18Z",
+     "updatedAt": "2026-10-16T13:56:18Z",
+     "url": "https://example.invalid/url-4"
+    }
+   ]
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-10-16T13:56:04Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38911730318,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-16T13:56:20Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38911720064,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-2",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-16T13:56:15Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-10-16T13:49:49Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f0"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f1"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f2"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f3"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "src/f4"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "src/f5"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f6"
+    }
+   ]
+  },
+  "headRefName": "branch-48",
+  "headRefOid": "b5dbc4aeb9ff647f1bdd1382f3a80ffaa6957e55",
+  "isDraft": false,
+  "labels": {
+   "nodes": [
+    {
+     "name": "agent:claude"
+    }
+   ]
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": {
+   "oid": "ddd567b846b676db02f2c2e88c612ee337948944"
+  },
+  "mergeStateStatus": "UNKNOWN",
+  "mergeable": "UNKNOWN",
+  "merged": true,
+  "mergedAt": "2026-10-16T14:01:19Z",
+  "number": 48,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P1\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": false,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-16T13:56:06Z"
+       }
+      ]
+     }
+    }
+   ],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": null
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "31aff1b26338ed7708b61dbccd12e3509f539852"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-16T13:53:47Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-1"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "31aff1b26338ed7708b61dbccd12e3509f539852"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-16T13:56:06Z"
+    }
+   ]
+  },
+  "state": "MERGED",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 48",
+  "url": "https://github.com/acme/app/pull/48"
+ }
+}

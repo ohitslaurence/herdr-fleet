@@ -1,0 +1,237 @@
+{
+ "calls": {
+  "deploy:2404d1521a3c8fb3a04049136a09aea4426bec88": [
+   "deployed",
+   "word-1 word-2 word-3"
+  ],
+  "files": [
+   "src/f0",
+   "src/f1",
+   "src/f2"
+  ],
+  "prev": {
+   "head": "26e96b02afd64500fc4227a3793b5cc6ad0cb798"
+  }
+ },
+ "expected": {
+  "act": null,
+  "detail": "word-1 word-2 word-3",
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": null,
+  "next": "done: merged and deployed. Tell the user in one line and stop. Never run or offer `dev done`: closing the context is the user's.",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "deployed",
+  "tier": null
+ },
+ "now": "2026-10-19T10:48:50.094827+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": null,
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 3,
+  "comments": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "greptile_confidence_score:5\nConfidence Score: 5/5\nLast reviewed commit: https://github.com/acme/app/commit/26e96b02afd64500fc4227a3793b5cc6ad0cb798",
+     "createdAt": "2026-10-13T08:10:07Z",
+     "updatedAt": "2026-10-13T08:10:13Z",
+     "url": "https://example.invalid/url-7"
+    }
+   ]
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-10-13T08:07:55Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38367198326,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": true,
+          "name": "check-1",
+          "startedAt": "2026-10-13T08:08:04Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38367195765,
+            "workflow": {
+             "name": "workflow-2"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-2",
+          "isRequired": false,
+          "name": "check-2",
+          "startedAt": "2026-10-13T08:08:04Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38367195765,
+            "workflow": {
+             "name": "workflow-2"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-3",
+          "isRequired": false,
+          "name": "check-3",
+          "startedAt": "2026-10-13T08:08:03Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38367198326,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SKIPPED",
+          "detailsUrl": "https://example.invalid/url-4",
+          "isRequired": true,
+          "name": "check-4",
+          "startedAt": "2026-10-13T08:08:02Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": null
+          },
+          "conclusion": "NEUTRAL",
+          "detailsUrl": "https://example.invalid/url-5",
+          "isRequired": false,
+          "name": "check-5",
+          "startedAt": "2026-10-13T08:08:37Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": null
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-6",
+          "isRequired": false,
+          "name": "check-6",
+          "startedAt": "2026-10-13T08:08:04Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-10-13T08:07:57Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "DELETED",
+     "path": "src/f0"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f1"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f2"
+    }
+   ]
+  },
+  "headRefName": "branch-96",
+  "headRefOid": "26e96b02afd64500fc4227a3793b5cc6ad0cb798",
+  "isDraft": false,
+  "labels": {
+   "nodes": []
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": {
+   "oid": "2404d1521a3c8fb3a04049136a09aea4426bec88"
+  },
+  "mergeStateStatus": "UNKNOWN",
+  "mergeable": "UNKNOWN",
+  "merged": true,
+  "mergedAt": "2026-10-13T08:08:33Z",
+  "number": 96,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": []
+  },
+  "state": "MERGED",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 96",
+  "url": "https://github.com/acme/app/pull/96"
+ }
+}

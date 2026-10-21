@@ -1,0 +1,8 @@
+# The workflows pin actions to commit SHAs; this keeps the pins current. The code itself has no
+# dependencies (standard-library Python only).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

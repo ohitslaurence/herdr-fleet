@@ -1,0 +1,812 @@
+#!/usr/bin/env python3
+"""fleet-cockpit — one screen for the whole fleet (run as `fleet`, `fleet ui`, `fleet ls`).
+
+  fleet                       interactive cockpit (plain listing when not a terminal)
+  fleet ls [--json]           print the cockpit once
+  fleet ls --refresh [--quiet]  re-run `ship` (read-only) over every open PR + every pane's PR first
+  fleet ls --all              also list the BACKLOG rows
+  fleet note ["<sentence>"]   set (or show) this worktree's one-line description; agents run this
+
+Sections, most urgent first:
+  NEEDS YOU       inbox items from fleet watch, and PRs ship says need a human
+  READY TO MERGE  clean, green, reviewed; waiting for your merge
+  IN FLIGHT       PRs with an agent pane on them, and agents working without a PR yet
+  NO AGENT        open PRs nobody is working on: stalled until you start an agent
+  IDLE            panes waiting with no open PR; "finished" ones can be `dev done`
+  BACKLOG         open PRs with no agent and no push for STALE_DAYS: collapsed, `b` expands
+
+Each row's description is the worktree's `fleet note`, else the PR title or pane title.
+
+Keys: ↑/↓ or j/k move · enter jump to the pane · o open the PR link · m merge (READY) · d dev done (finished)
+      t new session from a sentence · n rename an agent pane · c close a PR (BACKLOG / NO AGENT) · b show/hide BACKLOG
+      x dismiss an inbox item · y copy the PR link · r refresh · q quit
+
+Data: herdr (panes), ship's ledger (~/.local/state/fleet/ledger, refreshed by `fleet watch`
+every few minutes), the watch inbox, and units.tsv notes (merge order, next step).
+"""
+import base64, curses, hashlib, json, os, re, subprocess, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fleet_config  # noqa: E402
+from fleet_proc import HerdrDown, herdr_agents  # noqa: E402
+
+STATE_DIR = os.path.expanduser("~/.local/state/fleet")
+LEDGER = os.path.join(STATE_DIR, "ledger")
+WATCH = os.path.join(STATE_DIR, "watch.json")
+UNITS = os.path.join(STATE_DIR, "units.tsv")
+CACHE = os.path.join(STATE_DIR, "cockpit.json")
+NOTES = os.path.join(STATE_DIR, "notes.json")
+STALE_DAYS = 7
+URGENCY = os.path.join(STATE_DIR, "urgency.json")
+URGENCY_TTL = 6 * 3600
+SCORED = ("NEEDS YOU", "READY TO MERGE", "IN FLIGHT", "NO AGENT")
+USER = fleet_config.user_name()
+LEVELS = [f"Noise: nothing for {USER} to do, or purely informational.",
+          "FYI: worth knowing, but no action needed today.",
+          f"Needs a decision today: an agent is waiting on {USER}, or work is ready for them to merge or review.",
+          "Blocking production, money movement, customers or security: a failed deploy, payments, an outage, "
+          "a credential or data risk, or an agent stuck on something live."]
+
+NEEDS = ("needs-human", "churn", "deploy-failed", "deploy-gated")
+READY = ("awaiting-human", "mergeable")
+FINISHED = ("deployed", "closed")
+SECTIONS = ("NEEDS YOU", "READY TO MERGE", "IN FLIGHT", "NO AGENT", "IDLE", "BACKLOG")
+HUMAN_SECTIONS = ("NEEDS YOU", "READY TO MERGE")  # the rows that wait on a person
+
+
+def run(*args, timeout=60):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def setting(section, key, default):
+    """A [section] key from the fleet config, read when used (the server reloads config)."""
+    return fleet_config.get(section, key, default)
+
+
+def served(op, timeout=2.0):
+    """Ask the fleet server (fleet watch) instead of recomputing. None only when no server is
+    listening: then the caller computes the answer itself. A server that answered with an error,
+    or is too slow, raises: redoing its work locally would run two refreshes side by side."""
+    import fleet_serve
+    return fleet_serve.call(op, timeout=timeout)
+
+
+def current_rows():
+    """Rows from the server when it answers, else computed here (reading only, so any failure
+    may fall back)."""
+    try:
+        got = served("rows")
+    except Exception:
+        got = None
+    return got or collect()
+
+
+def jload(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def ago(iso):
+    if not iso:
+        return ""
+    s = (datetime.now(timezone.utc) - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds()
+    return f"{int(s // 60)}m" if s < 3600 else f"{int(s // 3600)}h" if s < 86400 else f"{int(s // 86400)}d"
+
+
+# ── data ─────────────────────────────────────────────────────────────────────
+
+def git_info(cwd):
+    out = run("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD", "--show-toplevel")
+    url = run("git", "-C", cwd, "remote", "get-url", "origin")
+    if not out or not url:
+        return None
+    branch, root = (out.split("\n") + [""])[:2]
+    m = re.search(r"github\.com[:/]([^/]+/[^/.\s]+?)(?:\.git)?\s*$", url.strip())
+    return (m.group(1), branch.strip(), root.strip()) if m else None
+
+
+def worktree_root(cwd):
+    out = run("git", "-C", cwd, "rev-parse", "--show-toplevel")
+    return out.strip() if out else os.path.abspath(cwd)
+
+
+def cmd_note(args):
+    """Agents describe their workstream in one sentence; the cockpit shows it on every row."""
+    root = worktree_root(os.getcwd())
+    notes = jload(NOTES, {})
+    if not args:
+        print(notes.get(root, {}).get("text") or f"no note for {root}")
+        return
+    if args[0].startswith("-") and args != ["--clear"]:
+        sys.exit('usage: fleet note ["<one sentence>"] | --clear')
+    from fleet_state import update
+    if args == ["--clear"]:
+        notes = update(NOTES, lambda n: n.pop(root, None) and None)
+    else:
+        text = " ".join(" ".join(args).split())
+        if len(text) > 160:
+            sys.exit("fleet note: keep it to one sentence (160 chars max)")
+        entry = {"text": text, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                 "pane": os.environ.get("HERDR_PANE_ID"), "by": "agent"}
+        notes = update(NOTES, lambda n: n.__setitem__(root, entry))
+    print(f"noted for {os.path.basename(root)}: {notes.get(root, {}).get('text', '(cleared)')}")
+
+
+def panes():
+    agents = herdr_agents()
+    labels = {}
+    ws = run("herdr", "workspace", "list")
+    if ws:
+        for w in json.loads(ws)["result"]["workspaces"]:
+            labels[w["workspace_id"]] = w.get("label")
+    names = {}
+    pl = run("herdr", "pane", "list")
+    if pl:
+        r2 = json.loads(pl)["result"]
+        for x in (r2.get("panes", []) if isinstance(r2, dict) else r2):
+            names[x["pane_id"]] = x.get("label")
+    with ThreadPoolExecutor(8) as ex:
+        infos = list(ex.map(lambda a: git_info(a.get("cwd") or "/"), agents))
+    for a, info in zip(agents, infos):
+        a["repo"], a["branch"], a["root"] = info if info else (None, None, a.get("cwd"))
+        a["ctx"] = labels.get(a["workspace_id"])
+        a["name"] = names.get(a["pane_id"])
+    return agents
+
+
+def units():
+    """repo#n -> (unit, note) from units.tsv; '#891' inherits the repo before it."""
+    notes = {}
+    try:
+        rows = Path(UNITS).read_text().splitlines()
+    except FileNotFoundError:
+        return notes
+    for line in rows:
+        if line.startswith("#") or "\t" not in line:
+            continue
+        cols = line.split("\t") + [""] * 5
+        unit, prs, status, nxt, note = cols[:5]
+        repo = None
+        for ref in prs.split(","):
+            m = re.match(r"\s*([\w.-]+)?#(\d+)", ref)
+            if not m:
+                continue
+            repo = m.group(1) or repo
+            if repo:
+                notes[f"{repo}#{m.group(2)}"] = (unit, " · ".join(x for x in (note, nxt) if x))
+    return notes
+
+
+# States that only move when the PR itself changes (head, CI, reviews, base, approvals): their
+# ship verdict stays valid while the PR's signature is unchanged. Everything else depends on
+# the clock (CI grace, review timeouts, deploy runs) and re-runs every refresh.
+STABLE = {"deployed", "closed", "awaiting-human", "needs-human", "conflicts", "behind", "ci-red",
+          "ci-cancelled", "review-findings", "self-review", "draft-clean", "mergeable", "churn",
+          "deploy-failed"}
+SIGS = os.path.join(STATE_DIR, "refresh-sigs.json")
+RECHECK_MIN = 60  # re-run ship on a quiet PR at least this often anyway
+
+
+_SHIP = {}
+
+
+PR_URL = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)$")
+
+
+def load_ship():
+    """ship as a module, loaded once (before the worker pool: 8 threads mustn't race to load it)."""
+    if "m" not in _SHIP:
+        import importlib.machinery, importlib.util
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ship")
+        loader = importlib.machinery.SourceFileLoader("ship_inproc", path)
+        spec = importlib.util.spec_from_loader("ship_inproc", loader)
+        m = importlib.util.module_from_spec(spec)
+        loader.exec_module(m)
+        _SHIP["m"] = m
+    return _SHIP["m"]
+
+
+def ship_inprocess(url):
+    """ship's read-only verdict for one PR without starting a process (fleet serve calls refresh
+    this way): evaluate + record, exactly what `ship <url> --json` does. Any failure costs this
+    one PR, as a failed `ship` subprocess did, never the whole refresh."""
+    m = PR_URL.match(url)
+    if not m:
+        print(f"refresh: skipping {url!r}: not a github.com PR URL", file=sys.stderr)
+        return None
+    try:
+        s, _, _ = load_ship().evaluate(m.group(1), m.group(2), int(m.group(3)))
+        _SHIP["m"].persist(s)
+    except SystemExit:  # ship's die(): GitHub said no; same as a failed `ship` run
+        return None
+    except Exception as e:
+        print(f"refresh: {url}: {type(e).__name__}: {e}"[:300], file=sys.stderr)
+        return None
+    return "ok"
+
+
+def refresh(quiet=False, inprocess=False):
+    """Ship's read-only verdict for every open PR of mine, every pane's PR (any state), and
+    merged PRs whose deploy was still running or awaiting approval. One GraphQL call fingerprints
+    them all; ship re-runs only where the fingerprint moved, the state is time-dependent, or the
+    verdict is older than RECHECK_MIN."""
+    from fleet_gh import pr_signatures, prs_for_branches
+    import fleet_paths
+    # settings may have changed since the last refresh: a long-running server must see them
+    fleet_config._cache.clear()
+    fleet_paths._cache.clear()
+    urls = set()
+    owners = [a for o in fleet_config.orgs() for a in ("--owner", o)]  # none: my PRs anywhere
+    out = run("gh", "search", "prs", *owners, "--state", "open", "--author", "@me",
+              "--limit", "100", "--json", "url")
+    if out:
+        urls |= {p["url"] for p in json.loads(out)}
+
+    try:
+        live = panes()
+    except HerdrDown:
+        live = []  # the open-PR search above still finds them; only branch matching is lost
+    pairs = [(a["repo"], a["branch"]) for a in live if a["repo"] and a["branch"] not in ("HEAD", "main", "master")]
+    urls |= {pr["url"] for pr in prs_for_branches(pairs).values() if pr}
+
+    # Merged PRs leave the open-PR search, and their pane may have moved on to main:
+    # keep re-checking any whose deploy hadn't finished last time we looked.
+    ledger = {}
+    for fn in os.listdir(LEDGER) if os.path.isdir(LEDGER) else []:
+        try:
+            with open(os.path.join(LEDGER, fn)) as f:
+                rec = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if rec.get("url"):
+            ledger[rec["url"]] = rec
+            if rec.get("state") in ("deploying", "deploy-gated"):
+                urls.add(rec["url"])
+
+    sigs, old = pr_signatures(urls), jload(SIGS, {})
+
+    def fresh(u):
+        rec, sig = ledger.get(u) or {}, sigs.get(u)
+        return (sig is not None and old.get(u) == sig and rec.get("state") in STABLE
+                and age_min(rec.get("checked_at")) < setting("cockpit", "recheck_minutes", RECHECK_MIN))
+
+    todo = sorted(u for u in urls if not fresh(u))
+    if inprocess:
+        load_ship()
+    verdict = ship_inprocess if inprocess else (lambda u: run("ship", u, "--json", timeout=120))
+    with ThreadPoolExecutor(8) as ex:
+        results = list(ex.map(lambda u: (u, verdict(u)), todo))
+    ran = {u for u, r in results if r}
+    keep = {u: old[u] for u in urls if u in old and u not in todo}
+    keep.update({u: sigs[u] for u in ran if sigs.get(u)})
+    from fleet_state import write  # atomic: the server and the cockpit read these mid-refresh
+    write(SIGS, keep)
+    ok = sorted((urls - set(todo)) | ran)
+    write(CACHE, {"refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "urls": ok})
+    score_urgency(collect()["rows"])
+    if not quiet:
+        print(f"refreshed {len(ok)}/{len(urls)} PRs (ship ran on {len(todo)}, {len(urls) - len(todo)} unchanged)",
+              file=sys.stderr)
+
+
+def age_min(iso):
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds() / 60
+    except (AttributeError, ValueError):
+        return float("inf")
+
+
+def row_sig(r):
+    return hashlib.sha1(f"{r['where']}|{r['what']}|{r['detail'][:160]}".encode()).hexdigest()[:12]
+
+
+def score_urgency(rows):
+    """Decision layer: one Jev request scores every new row from
+    noise to blocking-prod; the cockpit sorts by it *within* a section. It never hides a row,
+    never moves one between sections, and never acts. Cached per row content for 6 h."""
+    cache = {k: v for k, v in jload(URGENCY, {}).items() if time.time() - v.get("at", 0) < setting("cockpit", "urgency_ttl_hours", URGENCY_TTL / 3600) * 3600}
+    todo = [r for r in rows if r["section"] in SCORED and row_sig(r) not in cache][:40]
+    if todo:
+        try:
+            import fleet_decide as F
+            state = {"rows": {f"r{i}": {"section": r["section"], "item": r["where"], "status": r["what"],
+                                        "detail": r["detail"][:300], "age": r.get("age") or ""}
+                              for i, r in enumerate(todo)}}
+            questions = {f"r{i}": {"type": "score", "criteria": LEVELS,
+                                   "instructions": f"How urgent is `rows.r{i}` for {USER}, the engineer "
+                                                   "who oversees these agents and PRs?"}
+                         for i in range(len(todo))}
+            d = F.decide("cockpit.urgency", action="order cockpit rows by urgency within each section",
+                         why="put the human's attention on the row that matters most first",
+                         state=state, questions=questions, subject="cockpit", rule="alphabetical within section")
+            if d.act:
+                for i, r in enumerate(todo):
+                    a = d.answers.get(f"r{i}") or {}
+                    if "score" in a:
+                        cache[row_sig(r)] = {"score": round(a["score"], 2), "at": time.time()}
+        except Exception:
+            pass  # ordering is a nicety: never break the cockpit over it
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(URGENCY + ".tmp", "w") as f:
+        json.dump(cache, f)
+    os.replace(URGENCY + ".tmp", URGENCY)
+
+
+def collect():
+    cache = jload(CACHE, {"urls": []})
+    wanted = set(cache["urls"])
+    prs = []
+    if os.path.isdir(LEDGER):
+        for name in os.listdir(LEDGER):
+            s = jload(os.path.join(LEDGER, name), None)
+            if s and s.get("url") in wanted:
+                prs.append(s)
+    try:
+        ps, herdr_error = panes(), None
+    except HerdrDown as e:  # PR rows still show; every listing says the agent side is missing
+        ps, herdr_error = [], str(e)
+    by_branch = {(p["repo"], p["branch"]): p for p in ps if p["repo"]}
+    notes = units()
+    inbox = [i for i in jload(WATCH, {}).get("inbox", []) if i.get("open")]
+    pane_by_id = {p["pane_id"]: p for p in ps}
+    desc = jload(NOTES, {})
+
+    def note_for(path):
+        return (desc.get(path or "") or {}).get("text") or ""
+
+    def idle_days(s):
+        at = s.get("pushed_at") or s.get("created_at") or s.get("checked_at")
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(at.replace("Z", "+00:00"))).days if at else 0
+
+    rows = []
+    for i in inbox:
+        p = pane_by_id.get(i["pane"], {})
+        rows.append({"section": "NEEDS YOU", "kind": "inbox", "id": i["id"], "pane": i["pane"],
+                     "where": p.get("name") or os.path.basename(i["cwd"]) or i["pane"], "what": i["kind"],
+                     "detail": " ".join(i["text"].split()), "age": ago(i["ts"]), "ctx": p.get("ctx")})
+    claimed = set()
+    for s in prs:
+        repo_name = s["repo"].split("/")[1]
+        ref = f"{repo_name}#{s['number']}"
+        p = by_branch.get((s["repo"], s["branch"]))
+        if p:
+            claimed.add(p["pane_id"])
+        unit, note = notes.get(ref, (None, ""))
+        state = s["state"]
+        if state in FINISHED and not p:
+            continue
+        merged = state in FINISHED or state.startswith("deploy")
+        stale = not p and not merged and idle_days(s) >= setting("cockpit", "stale_days", STALE_DAYS)
+        section = ("BACKLOG" if stale else "NEEDS YOU" if state in NEEDS else "READY TO MERGE" if state in READY
+                   else "IDLE" if state in FINISHED else "IN FLIGHT" if p else "NO AGENT")
+        about = note_for(p["root"] if p else s.get("cwd")) or s["title"]
+        if section == "READY TO MERGE":
+            detail = about + (f"  ⟶ {note}" if note else "")
+        elif section == "BACKLOG":
+            detail = f"{idle_days(s)}d no push · {about}"
+        elif section == "IDLE":
+            detail = f"{about} · finished" if state in FINISHED else f"{about} · {s['next']}"
+        else:
+            detail = f"{about} · {s['next']}"
+        rows.append({"section": section, "kind": "pr", "pane": p and p["pane_id"], "ctx": p and p["ctx"],
+                     "agent": p and (p.get("name") or p.get("ctx") or os.path.basename(p.get("cwd") or "")),
+                     "pane_status": p and p.get("agent_status"), "where": ref, "what": state, "url": s["url"],
+                     "head": s.get("head"), "repo": s["repo"], "number": s["number"], "detail": detail,
+                     "age": ago(s.get("checked_at")), "finished": state in FINISHED, "idle": idle_days(s),
+                     # what a reader needs without opening GitHub: why it's in this state, how serious,
+                     # and the two different clocks (when ship last looked, when someone last pushed)
+                     "reason": s.get("detail") or ", ".join(s.get("failing") or []) or None,
+                     "critical": s.get("tier") == "critical", "checked_at": s.get("checked_at"),
+                     "pushed_at": s.get("pushed_at"),
+                     "failure_log": (s.get("failure_log") or {}).get("tail")})
+    for p in ps:
+        if p["pane_id"] in claimed:
+            continue
+        where = p.get("name") or os.path.basename(p.get("cwd") or "") or p["pane_id"]
+        status = p.get("agent_status")
+        section = "IN FLIGHT" if status == "working" else "IDLE"
+        detail = note_for(p.get("root")) or p.get("terminal_title_stripped") or ""
+        rows.append({"section": section, "kind": "pane", "pane": p["pane_id"], "ctx": p.get("ctx"),
+                     "where": where, "what": f"{p['agent']} {status}", "detail": detail or "no PR",
+                     "age": "", "finished": False, "pane_status": status})
+    order = {k: i for i, k in enumerate(SECTIONS)}
+    urgency = jload(URGENCY, {})
+    for r in rows:
+        u = (urgency.get(row_sig(r)) or {}).get("score")
+        r["urgency"] = u
+        r["urgent"] = u is not None and u >= 2.5
+        r["needs_human"] = r["section"] in HUMAN_SECTIONS
+    rows.sort(key=lambda r: (order[r["section"]], not r.get("finished"),
+                             r.get("idle", 0) if r["section"] == "BACKLOG" else 0,
+                             -(r["urgency"] if r.get("urgency") is not None else 1.5), r["where"]))
+    return {"rows": rows, "refreshed_at": cache.get("refreshed_at"), "herdr_error": herdr_error}
+
+
+def shown_detail(r):
+    """The detail as a person reads it: ‼ for urgent, [critical] for the risk tier."""
+    return ("‼ " if r.get("urgent") else "") + r["detail"] + ("  [critical]" if r.get("critical") else "")
+
+
+def print_listing(data, as_json=False, show_all=False):
+    if as_json:
+        print(json.dumps(data, indent=1))
+        return
+    age = ago(data["refreshed_at"])
+    print(f"fleet  ·  PR data {age + ' old' if age else 'never refreshed'} (fleet ls --refresh)")
+    for sec in SECTIONS:
+        rows = [r for r in data["rows"] if r["section"] == sec]
+        if not rows:
+            continue
+        if sec == "BACKLOG" and not show_all:
+            print(f"\nBACKLOG ({len(rows)}): open PRs, no agent, no push for {setting('cockpit', 'stale_days', STALE_DAYS)}+ days (fleet ls --all)")
+            continue
+        print(f"\n{sec} ({len(rows)})")
+        for r in rows:
+            badge = "PR" if r["kind"] == "pr" else "●"
+            who = f"@{r['agent']} " if r.get("agent") else ""
+            print(f"  {badge:2} {r['where'][:32]:32} {r['what'][:16]:16} {who}{shown_detail(r)[:110]}")
+
+
+# ── actions ──────────────────────────────────────────────────────────────────
+
+def focus(pane):
+    run("herdr", "agent", "focus", pane)
+
+
+NEW_CANCELLED = 3  # fleet new's exit when nothing was started
+
+
+def after_new_session(returncode):
+    """What the cockpit does after `t` ran fleet new. "close" once it took you to a session, as
+    after a jump: a popup cockpit left open hides behind that session, and herdr refuses every
+    other popup (ctrl+w f and t do nothing). "stay" when you cancelled; "error" otherwise."""
+    return {0: "close", NEW_CANCELLED: "stay"}.get(returncode, "error")
+
+
+def target(r):
+    """What a merge/close will actually act on, from the same fields the command uses: the
+    confirmation must never show one PR and act on another."""
+    return f"{r['repo']}#{r['number']}" + (f" @ {r['head'][:7]}" if r.get("head") else "")
+
+
+def merge(r, admin=False):
+    if not r.get("head"):
+        return False, ["no head commit known for this PR; refresh (r) and try again"]
+    args = ["gh", "pr", "merge", str(r["number"]), "-R", r["repo"], "--squash", "--match-head-commit", r["head"]]
+    if admin:
+        args.append("--admin")
+    p = subprocess.run(args, capture_output=True, text=True)
+    return p.returncode == 0, (p.stderr or p.stdout).strip().splitlines()[-1:] or [""]
+
+
+def close_pr(r):
+    p = subprocess.run(["gh", "pr", "close", str(r["number"]), "-R", r["repo"], "--comment",
+                        "Closed from the fleet cockpit: no agent on it and no recent pushes. Reopen to resume."],
+                       capture_output=True, text=True)
+    return p.returncode == 0, (p.stderr or p.stdout).strip().splitlines()[-1:] or [""]
+
+
+def dev_done(ctx):
+    p = subprocess.run(["dev", "done", ctx], capture_output=True, text=True)
+    return p.returncode == 0, ((p.stderr or p.stdout).strip().splitlines() or [""])[-1]
+
+
+def dismiss(item_id):
+    run("fleet", "inbox", "done", item_id)
+
+
+def copy(text):
+    """OSC 52: copies through SSH to the local clipboard in terminals that allow it."""
+    sys.stdout.write(f"\033]52;c;{base64.b64encode(text.encode()).decode()}\a")
+    sys.stdout.flush()
+
+
+# ── interactive ──────────────────────────────────────────────────────────────
+
+class UI:
+    def __init__(self, scr):
+        self.scr, self.cur, self.top = scr, 0, 0
+        self.msg, self.busy = "", False
+        self.backlog = False
+        self.data = current_rows()
+
+    def items(self):
+        return [r for r in self.data["rows"] if self.backlog or r["section"] != "BACKLOG"]
+
+    def bg_refresh(self):
+        if self.busy:
+            return
+        self.busy, self.msg = True, "refreshing PRs (ship, read-only)…"
+
+        def work():
+            try:
+                got = served("refresh", timeout=600)
+                if got is None:
+                    refresh(quiet=True)
+                    got = collect()
+                self.data = got
+                self.msg = "refreshed"
+            except Exception as e:  # never leave the cockpit stuck on "refreshing…"
+                self.msg = f"refresh failed: {str(e)[:120]}"
+            finally:
+                self.busy = False
+        threading.Thread(target=work, daemon=True).start()
+
+    def ask(self, question):
+        h, w = self.scr.getmaxyx()
+        self.scr.move(h - 1, 0)
+        self.scr.clrtoeol()
+        self.scr.addnstr(h - 1, 0, f"{question} [y/N] ", w - 1, curses.A_BOLD)
+        self.scr.timeout(-1)
+        ch = self.scr.getch()
+        self.scr.timeout(1000)
+        return ch in (ord("y"), ord("Y"))
+
+    def prompt(self, question):
+        h, w = self.scr.getmaxyx()
+        self.scr.move(h - 1, 0)
+        self.scr.clrtoeol()
+        self.scr.addnstr(h - 1, 0, question, w - 1, curses.A_BOLD)
+        curses.echo()
+        curses.curs_set(1)
+        self.scr.timeout(-1)
+        try:
+            text = self.scr.getstr(h - 1, min(len(question), w - 2), 40).decode(errors="ignore").strip()
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+            self.scr.timeout(1000)
+        return re.sub(r"\s+", "-", text)
+
+    def show_link(self, r):
+        """herdr may run on a remote box while the browser is local. herdr's client opens http(s)
+        links on ctrl-click in the browser where the client runs (cmd-click is not supported)."""
+        import fleet_term
+        url = r.get("url") or ""
+        if not PR_URL.match(url):  # this URL goes into a terminal link and the clipboard
+            self.msg = "no GitHub PR link on this row"
+            return
+        curses.def_prog_mode()
+        curses.endwin()
+        copy(url)  # before the screen text: herdr forwards OSC 52 with the next frame it draws
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.write(f"\n  {fleet_term.clean(r['where'])}  {fleet_term.clean(r['detail'][:100])}\n\n")
+        sys.stdout.write(f"  \033]8;;{url}\033\\\033[1;4m{url}\033[0m\033]8;;\033\\\n\n")
+        sys.stdout.write("  ctrl-click the link to open it in your browser (herdr opens links on ctrl-click, not cmd-click)\n"
+                         "  also copied to the clipboard · any key goes back\n")
+        sys.stdout.flush()
+        self.scr.timeout(-1)
+        self.scr.getch()
+        self.scr.timeout(1000)
+        curses.reset_prog_mode()
+        self.scr.clear()
+        self.msg = f"link copied too: {url}"
+
+    def draw_row(self, y, w, r, selected):
+        """Agent rows: status dot + bold cyan name. PR rows: dim `PR` badge, and the agent
+        working on it (if any) as a cyan @name before the description."""
+        sel = curses.A_REVERSE if selected else 0
+        cyan = curses.color_pair(6)
+        if r["kind"] == "pr":
+            badge, battr = "PR", curses.A_DIM
+            name_attr = curses.A_NORMAL
+        else:
+            st = r.get("pane_status")
+            badge = {"working": "●", "idle": "○", "done": "◉", "blocked": "!"}.get(st, "●")
+            battr = curses.color_pair({"working": 2, "blocked": 1}.get(st, 0)) | (0 if st == "working" else curses.A_DIM)
+            name_attr = curses.A_BOLD | cyan
+        segs = [(" ", 0), (f"{badge:2} ", battr), (f"{r['where'][:30]:30} ", name_attr), (f"{r['what'][:15]:15} ", 0)]
+        if r["kind"] == "pr" and r.get("agent"):
+            segs.append((f"@{r['agent']} ", cyan))
+        segs.append((shown_detail(r), 0))
+        x = 0
+        self.scr.move(y, 0)
+        self.scr.clrtoeol()
+        for text, attr in segs:
+            if x >= w - 1:
+                break
+            self.scr.addnstr(y, x, text, w - 1 - x, attr | sel)
+            x += len(text)
+        if selected and x < w - 1:
+            self.scr.addnstr(y, x, " " * (w - 1 - x), w - 1 - x, sel)
+
+    def draw(self):
+        scr = self.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        rows = self.items()
+        self.cur = max(0, min(self.cur, len(rows) - 1))
+        lines, sel_line = [], 0
+        for sec in SECTIONS:
+            group = [r for r in rows if r["section"] == sec]
+            if sec == "BACKLOG" and not self.backlog:
+                n = sum(r["section"] == "BACKLOG" for r in self.data["rows"])
+                if n:
+                    lines.append(("head", f"BACKLOG ({n}) · no agent, no push for {setting('cockpit', 'stale_days', STALE_DAYS)}+ days · b to show", None))
+                continue
+            if not group:
+                continue
+            lines.append(("head", f"{sec} ({len(group)})", None))
+            for r in group:
+                if rows.index(r) == self.cur:
+                    sel_line = len(lines)
+                lines.append(("row", r, rows.index(r)))
+            lines.append(("gap", "", None))
+        body = h - 4
+        if sel_line < self.top:
+            self.top = sel_line
+        elif sel_line >= self.top + body:
+            self.top = sel_line - body + 1
+        age = ago(self.data["refreshed_at"]) or "never"
+        down = f" · herdr unreachable: {self.data['herdr_error']}" if self.data.get("herdr_error") else ""
+        scr.addnstr(0, 0, f" fleet · {len(rows)} items · PR data {age} old{down}", w - 1, curses.A_REVERSE)
+        for y, (kind, val, idx) in enumerate(lines[self.top:self.top + body], start=1):
+            if kind == "head":
+                scr.addnstr(y, 0, val, w - 1, curses.A_BOLD | curses.color_pair(head_color(val)))
+            elif kind == "row":
+                self.draw_row(y, w, val, idx == self.cur)
+        sel = rows[self.cur] if rows else None
+        if sel and sel.get("url") and not self.msg:
+            # a plain URL on screen: ctrl-click opens it in the local browser
+            scr.addnstr(h - 2, 0, f" {sel['url']}"[: w - 1], w - 1, curses.color_pair(6))
+        help_ = "enter jump · t new session · o open PR · n rename · m merge · d dev done · c close PR · b backlog · x dismiss · y copy · r refresh · q quit"
+        scr.addnstr(h - 1, 0, (self.msg or help_)[: w - 1], w - 1, curses.A_DIM)
+        scr.refresh()
+
+    def loop(self):
+        curses.curs_set(0)
+        self.scr.timeout(1000)
+        if not self.data["refreshed_at"]:
+            self.bg_refresh()
+        while True:
+            self.draw()
+            ch = self.scr.getch()
+            if ch == -1:
+                continue
+            rows = self.items()
+            r = rows[self.cur] if rows else None
+            self.msg = "" if not self.busy else self.msg
+            if ch in (ord("q"), 27):
+                return
+            if ch in (curses.KEY_DOWN, ord("j")):
+                self.cur += 1
+            elif ch in (curses.KEY_UP, ord("k")):
+                self.cur -= 1
+            elif ch == ord("r"):
+                self.bg_refresh()
+            elif ch == ord("n"):
+                if not r or not r.get("pane"):
+                    self.msg = "n renames an agent pane; this row has none"
+                else:
+                    name = self.prompt(f"name for {r['where']}: ")
+                    if name:
+                        ok = run("herdr", "pane", "rename", r["pane"], name) is not None
+                        # herdr's agents panel shows the workspace name. `dev` finds its worktree
+                        # contexts by that name, so only rename workspaces that aren't dev worktrees.
+                        try:
+                            p = next((x for x in panes() if x["pane_id"] == r["pane"]), {})
+                        except HerdrDown:
+                            p = {}
+                        from fleet_paths import is_linked_worktree
+                        if ok and not is_linked_worktree(p.get("root") or p.get("cwd") or "/"):
+                            ok = run("herdr", "workspace", "rename", p["workspace_id"], name) is not None
+                        self.data = collect()
+                        self.msg = f"renamed to {name}" if ok else "rename failed"
+            elif ch == ord("t"):
+                curses.def_prog_mode()
+                curses.endwin()
+                after = after_new_session(subprocess.run(["fleet-new"]).returncode)
+                if after == "close":
+                    return
+                if after == "error":
+                    input("\nfleet new failed (see above). Enter: back to the cockpit ")
+                curses.reset_prog_mode()
+                self.scr.clear()
+                self.data = collect()
+            elif ch == ord("b"):
+                self.backlog = not self.backlog
+            elif not r:
+                continue
+            elif ch in (10, 13, curses.KEY_ENTER):
+                if r.get("pane"):
+                    focus(r["pane"])
+                    return
+                self.msg = f"no pane for this PR: {r.get('url', '')}"
+            elif ch == ord("o"):
+                if r.get("url"):
+                    self.show_link(r)
+                else:
+                    self.msg = "o opens a PR row's link"
+            elif ch == ord("y") and PR_URL.match(r.get("url") or ""):
+                copy(r["url"])
+                self.msg = f"copied {r['url']}"
+                self.scr.refresh()
+            elif ch == ord("x") and r["kind"] == "inbox":
+                dismiss(r["id"])
+                self.data = collect()
+                self.msg = "dismissed"
+            elif ch == ord("m"):
+                if r["section"] != "READY TO MERGE":
+                    self.msg = "only READY TO MERGE rows can be merged here"
+                elif self.ask(f"squash-merge {target(r)} ({r['detail'][:60]})?"):
+                    ok, err = merge(r)
+                    if not ok and "review" in " ".join(err).lower() and self.ask(f"needs an approving review; merge {target(r)} with --admin?"):
+                        ok, err = merge(r, admin=True)
+                    self.msg = f"merged {r['where']}; fleet watch will tell its agent" if ok else f"merge failed: {' '.join(err)[:150]}"
+                    if ok:
+                        self.bg_refresh()
+            elif ch == ord("c"):
+                if r["kind"] != "pr" or r["section"] not in ("BACKLOG", "NO AGENT"):
+                    self.msg = "c closes PRs nobody is working on (BACKLOG / NO AGENT rows)"
+                elif self.ask(f"close {target(r)} without merging ({r['detail'][:60]})?"):
+                    ok, err = close_pr(r)
+                    self.msg = f"closed {r['where']}" if ok else f"close failed: {' '.join(err)[:150]}"
+                    if ok:
+                        self.data["rows"] = [x for x in self.data["rows"] if x is not r]
+            elif ch == ord("d"):
+                if not (r.get("finished") and r.get("ctx")):
+                    self.msg = "dev done only for finished rows (PR merged/deployed or closed) with a context"
+                elif self.ask(f"dev done {r['ctx']} (removes the worktree and its workspace)?"):
+                    ok, out = dev_done(r["ctx"])
+                    self.msg = f"done: {r['ctx']}" if ok else f"dev done refused: {out[:150]}"
+                    self.data = collect()
+
+
+def head_color(title):
+    return {"NEEDS YOU": 1, "READY TO MERGE": 2, "IN FLIGHT": 3, "NO AGENT": 5, "IDLE": 4}.get(title.split(" (")[0], 0)
+
+
+def interactive():
+    def main(scr):
+        curses.use_default_colors()
+        for i, c in enumerate((curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE,
+                               curses.COLOR_MAGENTA, curses.COLOR_CYAN), 1):
+            curses.init_pair(i, c, -1)
+        UI(scr).loop()
+    curses.wrapper(main)
+
+
+def require_herdr(cmd, data):
+    """Exit 1 when herdr didn't answer: the listing would read as "no agents running"."""
+    if data.get("herdr_error"):
+        sys.exit(f"{cmd}: herdr unreachable: {data['herdr_error']}")
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if not (sys.stdout.isatty() and a[:1] in ([], ["ui"])):
+        import fleet_term
+        fleet_term.protect_stdout()  # titles, notes, agent text: untrusted (curses handles its own)
+    if any(x in ("-h", "--help", "help") for x in a):
+        print(__doc__.strip())
+    elif a[:1] == ["note"]:
+        cmd_note(a[1:])
+    elif a[:1] == ["ls"]:
+        data = None
+        if "--refresh" in a:
+            try:
+                data = served("refresh", timeout=600)
+            except Exception as e:  # the server is up but refused or timed out: don't refresh twice
+                sys.exit(f"fleet ls --refresh: the fleet server's refresh failed: {e}")
+            if data is None:
+                refresh(quiet="--quiet" in a)
+        if "--quiet" not in a:
+            data = data or current_rows()
+            require_herdr("fleet ls", data)
+            print_listing(data, "--json" in a, "--all" in a)
+    elif sys.stdout.isatty():
+        interactive()
+    else:
+        data = collect()
+        require_herdr("fleet", data)
+        print_listing(data)

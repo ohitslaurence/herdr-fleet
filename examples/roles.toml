@@ -1,0 +1,27 @@
+# Who does what in the agent fleet. Edit this file to swap harnesses month to month;
+# orch, ship and fleet read it, and nothing else names a harness or model.
+#
+# kind:   claude | codex | opencode | opposite (the other of claude/codex from the PR's author)
+# model:  empty = the harness default
+# effort: low | medium | high | xhigh | max (codex reasoning effort; claude --effort in headless runs)
+
+[roles.driver]          # foreman / default interactive agent
+kind = "claude"
+
+[roles.worker]          # orch start default
+kind = "codex"
+effort = "xhigh"
+
+[roles.reviewer]        # second-opinion PR review: never the author's family
+kind = "opposite"
+effort = "high"
+
+[roles.advisor]         # fleet ask: read-only design consults
+kind = "claude"
+model = "opus"
+
+[kinds.claude]
+model = ""
+
+[kinds.codex]
+model = ""

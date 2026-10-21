@@ -1,0 +1,142 @@
+{
+ "calls": {
+  "files": [
+   "protected/f0",
+   "protected/f1"
+  ],
+  "prev": {
+   "head": "e838c262339def126cbb3b533623e56cfb8a62a2",
+   "head_seen_at": "2026-10-17T08:56:39+00:00"
+  },
+  "required": [
+   "check-2"
+  ]
+ },
+ "expected": {
+  "act": null,
+  "detail": null,
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": [
+   "check-2"
+  ],
+  "next": "main requires check-2, which never started on this head (30+ min); GitHub blocks the merge. Tell the user: the workflow may not run on pull_request, or the requirement is stale",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "needs-human",
+  "tier": null
+ },
+ "now": "2026-10-19T10:49:20.263244+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": null,
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 2,
+  "comments": {
+   "nodes": []
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-08-03T14:31:26Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": null
+          },
+          "conclusion": "SKIPPED",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-08-03T14:31:41Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-08-03T14:27:43Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "MODIFIED",
+     "path": "protected/f0"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f1"
+    }
+   ]
+  },
+  "headRefName": "branch-4",
+  "headRefOid": "e838c262339def126cbb3b533623e56cfb8a62a2",
+  "isDraft": false,
+  "labels": {
+   "nodes": []
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": null,
+  "mergeStateStatus": "BEHIND",
+  "mergeable": "MERGEABLE",
+  "merged": false,
+  "mergedAt": null,
+  "number": 4,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": []
+  },
+  "state": "OPEN",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 4",
+  "url": "https://github.com/acme/app/pull/4"
+ }
+}

@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+# orch — run worker agents (codex/claude/opencode) in herdr panes on dev worktrees and
+# supervise them through an append-only status log.
+#
+#   orch start  <name> --repo <alias> --brief <file> [--role R] [--kind codex|claude|opencode] [--model M|<nickname>] [--effort low|medium|high|xhigh] [--workspace]
+#               opencode: --model provider/model (e.g. opencode/kimi-k3); effort doesn't apply
+#               kind/model/effort default to `fleet role <R>` ([roles] in the fleet config; R defaults
+#               to worker; `--role security` for briefs Codex's cyber filter refuses)
+#               exit 1 "needs a human" when the agent shows a dialog orch won't answer (login, mode
+#               acceptance, hooks or trust prompts listing anything but the user's own); the pane is named
+#               default: the worker runs in a NEW TAB of the calling herdr workspace ($HERDR_WORKSPACE_ID);
+#               --workspace (or no HERDR_WORKSPACE_ID) gives it its own dev workspace instead
+#   orch prompt <name> "<text>"        steer a running worker (no wait)
+#   orch [--json] status                one line per worker, or one JSON object
+#   orch wait   [name...] [--all] [--timeout S]
+#               block until a worker reaches a terminal status you haven't been shown, print it and
+#               return, so you can read its report while the rest work (--all: until every worker is
+#               terminal). No names: the workers this pane started. Exit 2 "quiet: idle Nm with no
+#               status" when every pending worker has sat idle orch.quiet_min minutes without a
+#               status line (a refusal, a lost brief: read the log)
+#   orch report <name>                  print the worker's report.md
+#   orch log    <name> [lines]          recent pane output
+#   orch done   <name> [--force]        tear down (dev done) and archive state
+#   orch retro  [name|--last N]         timeline, tool-call stats from the worker transcript, report
+#
+# Worker contract (rendered into the brief from the template placeholders):
+#   append "<state>: <one line>" to $STATUS   state ∈ working|needs-decision|blocked|paused|done|failed
+#   write the standalone report to $REPORT
+# Terminal states: done failed blocked needs-decision. A herdr "idle" is NEVER
+# treated as finished; only the status log is. On "done", wait and report also check the
+# worktree and say if it has uncommitted changes or commits no remote has. `fleet watch`
+# prompts an idle orchestrator pane when one of its workers reaches a terminal status that
+# `orch wait` hasn't shown it.
+set -euo pipefail
+
+usage() { sed -n '2,/^set -euo/{/^set -euo/!p;}' "$0" | sed 's/^# \{0,1\}//'; }
+# help anywhere prints help and does nothing else: `orch start x --help` must not start a worker
+for a in "$@"; do case "$a" in -h|--help|help) usage; exit 0;; esac; done
+# associative arrays and mapfile: macOS's own /bin/bash is 3.2
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "orch: needs bash 4 or newer, this is $BASH_VERSION (macOS: \`brew install bash\`, first on PATH)" >&2; exit 1
+fi
+
+ORCH_HOME="${ORCH_HOME:-$HOME/.local/state/orch}"
+mkdir -p "$ORCH_HOME"
+BIN="$(dirname "$(readlink -f "$0")")"
+FO="$BIN/fleet_orch.py"
+TICK="${ORCH_TICK:-1}"   # scales every wait and poll below; tests set it small
+
+die() { echo "orch: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+# values out of herdr/dev JSON, by path and match; argv only, never code built from a string
+pick() { python3 "$FO" pick "$@"; }
+
+last_status() { # <name> -> "state: line" or ""
+  local f="$ORCH_HOME/$1/status"
+  [[ -f "$f" ]] && tail -n1 "$f" || true
+}
+state_of() { last_status "$1" | sed -E 's/^([a-z-]+).*/\1/'; }
+# keep in step with fleet_orch.TERMINAL (a test checks)
+is_terminal() { case "$1" in done|failed|blocked|needs-decision) return 0;; *) return 1;; esac; }
+
+agent_status() { herdr agent get "$1" 2>/dev/null | pick result.agent.agent_status 2>/dev/null || echo "-"; }
+
+cmd_start() {
+  local name="$1"; shift
+  local repo="" brief="" placement="tab" role="worker" kind_opt="" model_opt="" effort_opt=""
+  [[ -n "${HERDR_WORKSPACE_ID:-}" ]] || placement="workspace"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2;; --brief) brief="$2"; shift 2;; --role) role="$2"; shift 2;;
+      --kind) kind_opt="$2"; shift 2;; --model) model_opt="$2"; shift 2;; --effort) effort_opt="$2"; shift 2;;
+      --workspace) placement="workspace"; shift;; --tab) placement="tab"; shift;;
+      *) die "unknown flag $1";;
+    esac
+  done
+  # Defaults come from the fleet roles config; the flags above override.
+  local kind="codex" model="" effort="xhigh" _r
+  if _r=$("$BIN/fleet" role "$role" 2>&1); then
+    read -r kind model effort <<<"$_r"
+  elif [[ "$role" != worker ]]; then
+    die "fleet role $role failed: ${_r##*: }"
+  else
+    echo "orch: warning: fleet role worker failed (${_r##*: }); defaulting to --kind codex" >&2
+  fi
+  [[ "$model" == "-" ]] && model=""; [[ "$effort" == "-" ]] && effort="xhigh"
+  # --model may be one of the user's [models.<nickname>] names: it brings its own harness
+  local nick_kind
+  if [[ -n "$model_opt" && "$model_opt" =~ ^[A-Za-z0-9_-]+$ ]] \
+      && nick_kind=$("$BIN/fleet" config get "models.$model_opt.harness" 2>/dev/null); then
+    model_opt=$("$BIN/fleet" config get "models.$model_opt.model") || die "models.$model_opt has no model"
+    kind_opt="${kind_opt:-$nick_kind}"
+  fi
+  kind="${kind_opt:-$kind}"; model="${model_opt:-$model}"; effort="${effort_opt:-$effort}"
+  [[ "$placement" == tab && -z "${HERDR_WORKSPACE_ID:-}" ]] && die "--tab needs HERDR_WORKSPACE_ID (run inside a herdr pane)"
+  [[ "$name" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match [a-z][a-z0-9_-]{0,31}"
+  [[ -n "$repo" && -n "$brief" ]] || die "usage: orch start <name> --repo <alias> --brief <file>"
+  [[ "$repo" =~ ^[A-Za-z0-9._-]+$ ]] || die "repo alias must match [A-Za-z0-9._-]+"
+  [[ -f "$brief" ]] || die "brief not found: $brief"
+  need herdr; need dev; need python3
+  [[ -d "$ORCH_HOME/$name" ]] && die "worker '$name' already exists (orch done $name first)"
+
+  local dir="$ORCH_HOME/$name"; mkdir -p "$dir"
+  : > "$dir/status"
+
+  local ws pane worktree tab=""
+  if [[ "$placement" == workspace ]]; then
+    # 1a. worktree + its own workspace via dev (label = name), without stealing focus
+    DEV_NO_FOCUS=1 command dev "$repo" "$name" >/dev/null
+    ws=$(herdr workspace list | pick result.workspaces "label=$name" workspace_id)
+    worktree=$(herdr workspace list | pick result.workspaces "label=$name" worktree.checkout_path)
+    pane=$(python3 - "$ws" <<'PY'
+import json,subprocess,sys
+ws=sys.argv[1]
+tabs={t["tab_id"]:t["label"] for t in json.loads(subprocess.run(["herdr","tab","list","--workspace",ws],capture_output=True,text=True).stdout)["result"]["tabs"]}
+panes=json.loads(subprocess.run(["herdr","pane","list","--workspace",ws],capture_output=True,text=True).stdout)["result"]["panes"]
+agent=[p for p in panes if tabs.get(p["tab_id"])=="agent"] or panes
+print(agent[0]["pane_id"])
+PY
+)
+
+  else
+    # 1b. worktree with dev's conventions, pane as a new tab in the caller's workspace
+    ws="$HERDR_WORKSPACE_ID"
+    local repo_path base
+    repo_path=$(command dev repos --json | pick repos "alias=$repo" path)
+    base=$(command dev repos --json | pick repos "alias=$repo" defaultBranch)
+    # path and branch follow the templates in ~/.config/fleet/config.toml (see bin/fleet_paths.py)
+    local paths="$(dirname "$(readlink -f "$0")")/fleet_paths.py"
+    worktree=$(python3 "$paths" worktree "$repo_path" "$repo" "$name")
+    local branch
+    branch=$(python3 "$paths" branch "$repo" "$name")
+    if [[ ! -d "$worktree" ]]; then
+      git -C "$repo_path" fetch -q origin "$base"
+      # hooks off: see fleet_paths.NO_HOOKS for why
+      if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch"; then
+        git -c core.hooksPath=/dev/null -C "$repo_path" worktree add -q "$worktree" "$branch"
+      else
+        git -c core.hooksPath=/dev/null -C "$repo_path" worktree add -q -b "$branch" "$worktree" "origin/$base"
+      fi
+      (cd "$worktree" && command dev bootstrap >/dev/null 2>&1 || true)
+    fi
+    local created
+    created=$(herdr tab create --workspace "$ws" --cwd "$worktree" --label "$name" --no-focus)
+    tab=$(pick result.tab.tab_id <<<"$created")
+    pane=$(pick result.root_pane.pane_id <<<"$created")
+  fi
+
+  # 2. render the brief (python: paths with | or & are literal; a leftover {{TASK}} is an error)
+  python3 "$FO" render "$brief" "$dir/brief.md" "NAME=$name" "STATUS=$dir/status" "REPORT=$dir/report.md" \
+      "WORKTREE=$worktree" || die "brief not rendered"
+
+  # 3. start the agent in the pane
+  local -a args
+  case "$kind" in
+    codex)
+      # check_for_update_on_startup: an update prompt blocks an unattended worker at launch
+      args=(--dangerously-bypass-approvals-and-sandbox -c "model_reasoning_effort=\"$effort\"" \
+            -c "check_for_update_on_startup=false" \
+            -c "notify=[\"bash\",\"-c\",\"touch $dir/turn-ended\"]")
+      [[ -n "$model" ]] && args+=(--model "$model") ;;
+    claude)
+      args=(--dangerously-skip-permissions)
+      [[ -n "$effort" ]] && args+=(--effort "$effort")
+      [[ -n "$model" ]] && args+=(--model "$model") ;;
+    opencode)
+      # --auto: approve tool calls not explicitly denied (opencode's skip-permissions)
+      args=(--auto)
+      [[ -n "$model" ]] && args+=(--model "$model") ;;
+    *) die "kind must be codex, claude or opencode";;
+  esac
+  # Record the worker before anything else can fail, so `orch status/done` can clean up a bad start.
+  # by: the orchestrator's pane, so wait and fleet watch know whose worker this is
+  printf 'name=%s\nkind=%s\nrepo=%s\nplacement=%s\nworkspace=%s\ntab=%s\npane=%s\nworktree=%s\nstarted=%s\nby=%s\n' \
+    "$name" "$kind" "$repo" "$placement" "$ws" "$tab" "$pane" "$worktree" "$(date -u +%FT%TZ)" \
+    "${HERDR_PANE_ID:-}" > "$dir/meta"
+  # A start that can't hand over the brief is a failed worker: say so in the status log too,
+  # so `orch wait` and `orch status` don't wait on it.
+  fail() { echo "failed: $1" >> "$dir/status"; die "$1 (pane $pane; then: herdr agent prompt $name \"\$(cat $dir/brief.md)\")"; }
+  herdr agent start "$name" --kind "$kind" --pane "$pane" --timeout 90000 -- "${args[@]}" >/dev/null \
+    || echo "orch: agent start reported not-ready; waiting for the composer" >&2
+
+  # Wait for the composer itself, not herdr's idle and not Claude's ❯ (every Claude dialog draws
+  # one): the harness reports ready before it accepts input, and a prompt sent then is lost.
+  # Dialogs: Claude's trust prompt and Codex's hook review are answered only when they list
+  # nothing but the worker's own worktree / the user's own ~/.codex hooks; anything else, or
+  # a login or mode-acceptance screen, is a human's call.
+  local answered=0 screen verdict="waiting"
+  for _ in $(seq 1 90); do
+    screen=$(herdr agent read "$name" --source visible 2>/dev/null || true)
+    verdict=$(python3 "$FO" classify "$kind" "$worktree" <<<"$screen")
+    case "$verdict" in
+      ready) break;;
+      trust|hooks)
+        (( answered >= 3 )) && fail "needs a human: the $verdict prompt didn't take"
+        answered=$((answered + 1))
+        herdr agent send-keys "$name" down enter >/dev/null || true; sleep "$TICK"; sleep "$TICK"; sleep "$TICK";;
+      human:*) fail "needs a human: ${verdict#human: }";;
+      *) sleep "$TICK";;
+    esac
+  done
+  [[ "$verdict" == ready ]] || fail "agent never became ready"
+
+  # 4. deliver the brief as the first prompt (no wait: supervision is via status log). Confirm it
+  # landed: a working signal or the brief's first line on screen. An empty composer gets one
+  # re-send; anything else is a human's call. Never two silent sends.
+  local first sent got="unknown"
+  first=$(head -n1 "$dir/brief.md")
+  for sent in 1 2; do
+    herdr agent prompt "$name" "$(cat "$dir/brief.md")" >/dev/null || fail "brief delivery failed"
+    for _ in $(seq 1 30); do
+      sleep "$TICK"
+      screen=$(herdr agent read "$name" --source visible 2>/dev/null || true)
+      got=$(python3 "$FO" delivered "$kind" "$first" <<<"$screen")
+      # herdr's own status beats the screen: Claude keeps an empty composer on screen while it works
+      [[ "$got" == working || "$(agent_status "$name")" != working ]] || got=working
+      [[ "$got" == working || "$got" == typed ]] && break 2
+    done
+    [[ "$got" == empty ]] || fail "brief not confirmed after $sent send(s): screen says $got"
+    [[ $sent == 1 ]] && echo "orch: composer empty after the brief; re-sending once" >&2
+  done
+  [[ "$got" == working || "$got" == typed ]] || fail "brief not confirmed after 2 sends: composer still empty"
+  echo "$(date -u +%FT%TZ) started kind=$kind effort=$effort placement=$placement sends=$sent" >> "$dir/events.log"
+  echo "started $name ($kind) in $ws $pane -> $worktree"
+}
+
+cmd_prompt() { herdr agent prompt "$1" "$2" >/dev/null && echo "sent to $1"; }
+
+cmd_status() {
+  python3 "$FO" status "$ORCH_HOME" "$@"
+}
+
+cmd_wait() {
+  local timeout=0 all=0; local -a names=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --timeout) timeout="$2"; shift 2;; --all) all=1; shift;; *) names+=("$1"); shift;; esac
+  done
+  if [[ ${#names[@]} -eq 0 && -n "${HERDR_PANE_ID:-}" ]]; then
+    for d in "$ORCH_HOME"/*/; do grep -qxF "by=$HERDR_PANE_ID" "$d/meta" 2>/dev/null && names+=("$(basename "$d")"); done
+  fi
+  # no pane, or workers started before orch recorded who started them: every worker
+  if [[ ${#names[@]} -eq 0 ]]; then for d in "$ORCH_HOME"/*/; do [[ -f "$d/meta" ]] && names+=("$(basename "$d")"); done; fi
+  local start; start=$(date +%s); declare -A seen=() idle_since=() quiet_said=()
+  # A worker idle this long with no status line said nothing on purpose (a refused brief, a lost
+  # prompt): report it instead of waiting out the timeout. 0 turns this off.
+  local quiet_min quiet_s; quiet_min=$("$BIN/fleet" config get orch.quiet_min 2>/dev/null || echo 0)
+  quiet_s=$(awk "BEGIN{printf \"%d\", ${quiet_min:-0} * 60 * $TICK}")
+  while :; do
+    local pending=0 quiet=0 fresh=0 now; now=$(date +%s)
+    for n in "${names[@]}"; do
+      local st; st=$(state_of "$n")
+      local ls; ls=$(last_status "$n")
+      # seen: lines already printed by this call (working lines included); reported: the last
+      # terminal line any earlier wait printed, so a finished worker is shown once, not every wait
+      local shown; shown=$(cat "$ORCH_HOME/$n/reported" 2>/dev/null || true)
+      if [[ -n "$ls" && "${seen[$n]:-}" != "$ls" && "$shown" != "$ls" ]]; then
+        echo "[$n] $ls"
+        echo "$(date -u +%FT%TZ) $ls" >> "$ORCH_HOME/$n/events.log"
+        if [[ "$st" == done ]]; then check_done "$n"; fi
+        # reported: the terminal line the orchestrator has seen; fleet watch won't prompt about it
+        if is_terminal "${st:-working}"; then printf '%s\n' "$ls" > "$ORCH_HOME/$n/reported"; fresh=$((fresh+1)); fi
+      fi
+      seen[$n]="$ls"
+      is_terminal "${st:-working}" && continue
+      pending=$((pending+1))
+      [[ "${quiet_min:-0}" != 0 ]] || continue
+      if [[ "$(agent_status "$n")" == idle ]]; then
+        idle_since[$n]="${idle_since[$n]:-$now}"
+        local idle_s=$(( now - idle_since[$n] )) touched
+        touched=$(stat -c %Y "$ORCH_HOME/$n/status" 2>/dev/null || stat -f %m "$ORCH_HOME/$n/status" 2>/dev/null || echo 0)
+        if (( idle_s >= quiet_s && touched < idle_since[$n] )); then
+          quiet=$((quiet+1))
+          [[ -n "${quiet_said[$n]:-}" ]] || { echo "[$n] quiet: idle $(( idle_s / 60 ))m with no status"; quiet_said[$n]=1; }
+        fi
+      else
+        unset "idle_since[$n]" "quiet_said[$n]"
+      fi
+    done
+    [[ $pending -eq 0 ]] && { echo "all terminal"; return 0; }
+    [[ $all -eq 0 && $fresh -gt 0 ]] && { echo "$pending still running; orch wait again after reading"; return 0; }
+    [[ $quiet -eq $pending ]] && { echo "quiet; $pending idle with no status (orch log <name>)"; return 2; }
+    if [[ $timeout -gt 0 && $(( now - start )) -ge $timeout ]]; then echo "timeout; $pending still running"; return 1; fi
+    sleep "$(awk "BEGIN{print 15 * $TICK}")"
+  done
+}
+
+# A worker's "done" is its claim; its worktree is the evidence. Say what it left behind.
+check_done() {
+  local wt left; wt=$(sed -n 's/^worktree=//p' "$ORCH_HOME/$1/meta" 2>/dev/null || true)
+  [[ -n "$wt" ]] || return 0
+  left=$(python3 "$FO" unfinished "$wt" 2>/dev/null || echo "can't check it")  # advisory: never stop wait
+  [[ -z "$left" ]] || echo "[$1] done, but its worktree: $left; check before orch done $1"
+}
+
+cmd_report() {
+  if [[ "$(state_of "$1")" == done ]]; then check_done "$1"; fi
+  cat "$ORCH_HOME/$1/report.md" 2>/dev/null || die "no report for $1"
+}
+cmd_log() { herdr agent read "$1" --source recent-unwrapped --lines "${2:-80}"; }
+
+cmd_done() {
+  local name="$1"; shift || true
+  [[ -d "$ORCH_HOME/$name" ]] || die "unknown worker $name"
+  local st; st=$(state_of "$name")
+  if ! is_terminal "${st:-working}" && [[ "${1:-}" != "--force" ]]; then die "$name is not terminal (state: ${st:-working}); pass --force to stop it anyway"; fi
+  # Quit the agent politely so the pane shell is all that's left.
+  local kind; kind=$(sed -n 's/^kind=//p' "$ORCH_HOME/$name/meta")
+  local quit="/quit"; [[ "$kind" == claude || "$kind" == opencode ]] && quit="/exit"
+  herdr agent send-keys "$name" esc >/dev/null 2>&1 || true
+  herdr pane send-text "$(sed -n 's/^pane=//p' "$ORCH_HOME/$name/meta")" "$quit" >/dev/null 2>&1 || true
+  sleep 1; herdr pane send-keys "$(sed -n 's/^pane=//p' "$ORCH_HOME/$name/meta")" enter >/dev/null 2>&1 || true
+  sleep 2
+  local meta="$ORCH_HOME/$name/meta"
+  if [[ "$(sed -n 's/^placement=//p' "$meta")" == tab ]]; then
+    # Tab mode: close the tab, then remove the worktree ourselves (dev has no context for it).
+    local tab wt repo_alias repo_path branch base
+    tab=$(sed -n 's/^tab=//p' "$meta"); wt=$(sed -n 's/^worktree=//p' "$meta"); repo_alias=$(sed -n 's/^repo=//p' "$meta")
+    repo_path=$(command dev repos --json | pick repos "alias=$repo_alias" path)
+    base=$(command dev repos --json | pick repos "alias=$repo_alias" defaultBranch)
+    branch=$(git -C "$wt" branch --show-current 2>/dev/null || true)
+    [[ -n "$tab" ]] && herdr tab close "$tab" >/dev/null 2>&1 || true
+    sleep 1
+    if [[ "${1:-}" != "--force" && -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
+      echo "orch: $wt has uncommitted changes; left in place (orch done $name --force to discard)" >&2
+    else
+      git -C "$repo_path" worktree remove ${1:+--force} "$wt" 2>/dev/null || git -C "$repo_path" worktree remove --force "$wt" || true
+      if [[ -n "$branch" ]] && [[ -z "$(git -C "$repo_path" rev-list "origin/$base..$branch" 2>/dev/null)" ]]; then
+        git -C "$repo_path" branch -D "$branch" >/dev/null 2>&1 || true   # no commits beyond base: nothing to keep
+      elif [[ -n "$branch" ]]; then
+        echo "orch: branch $branch has commits; kept" >&2
+      fi
+    fi
+  else
+    command dev done "$name" "$@" || true
+  fi
+  mkdir -p "$ORCH_HOME/.archive"; mv "$ORCH_HOME/$name" "$ORCH_HOME/.archive/$name-$(date +%Y%m%d%H%M%S)"
+  echo "archived $name"
+}
+
+cmd_retro() {
+  local -a dirs=()
+  if [[ "${1:-}" == --last ]]; then
+    mapfile -t dirs < <(ls -1dt "$ORCH_HOME"/.archive/*/ 2>/dev/null | head -n "${2:-1}")
+  elif [[ -n "${1:-}" ]]; then
+    dirs=("$ORCH_HOME/$1"); [[ -d "${dirs[0]}" ]] || dirs=("$(ls -1dt "$ORCH_HOME"/.archive/"$1"-*/ 2>/dev/null | head -1)")
+  else
+    mapfile -t dirs < <(ls -1dt "$ORCH_HOME"/.archive/*/ 2>/dev/null | head -4)
+  fi
+  for d in "${dirs[@]}"; do
+    [[ -d "$d" ]] || continue
+    echo "=================== $(basename "$d")"
+    echo "--- timeline"; cat "$d/events.log" 2>/dev/null || echo "(no events.log)"
+    echo "--- status log ($(wc -l < "$d/status" 2>/dev/null || echo 0) lines)"; cat "$d/status" 2>/dev/null
+    local wt; wt=$(sed -n 's/^worktree=//p' "$d/meta" 2>/dev/null)
+    local kind; kind=$(sed -n 's/^kind=//p' "$d/meta" 2>/dev/null)
+    if [[ "$kind" == codex && -n "$wt" ]]; then
+      local roll; roll=$(grep -l "\"cwd\":\"$wt\"" $(ls -t ~/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -60) 2>/dev/null | head -1)
+      if [[ -n "$roll" ]]; then
+        echo "--- codex transcript: $roll"
+        python3 - "$roll" <<'PYX'
+import json,sys,collections
+calls=collections.Counter(); errs=0; turns=0; first=last=None
+for line in open(sys.argv[1]):
+    try: e=json.loads(line)
+    except Exception: continue
+    ts=e.get("timestamp") or e.get("ts"); first=first or ts; last=ts or last
+    p=e.get("payload") or e
+    t=p.get("type") or e.get("type") or ""
+    if t in ("function_call","tool_call","custom_tool_call","local_shell_call"): calls[p.get("name") or t]+=1
+    if t=="mcp_tool_call": calls["mcp:"+str(p.get("invocation",{}).get("tool") or p.get("name"))]+=1
+    if "error" in json.dumps(p)[:200].lower() and t.endswith("output"): errs+=1
+    if t in ("turn_context","task_started"): turns+=1
+print(f"turns={turns} tool_calls={sum(calls.values())} errors~{errs} span={first} -> {last}")
+for k,v in calls.most_common(12): print(f"  {v:4d}  {k}")
+PYX
+      fi
+    fi
+    echo "--- report"; head -60 "$d/report.md" 2>/dev/null || echo "(no report)"
+    echo
+  done
+}
+
+if [[ "${1:-}" == --json ]]; then
+  [[ "${2:-}" == status ]] || { echo "orch: usage: orch --json status" >&2; exit 2; }
+  set -- status --json "${@:3}"
+fi
+
+case "${1:-}" in
+  start) shift; cmd_start "$@";;
+  prompt) shift; cmd_prompt "$@";;
+  status)
+    [[ "$#" -eq 1 || ( "$#" -eq 2 && "$2" == --json ) ]] || { echo "orch: usage: orch status [--json]" >&2; exit 2; }
+    shift; cmd_status "$@";;
+  wait) shift; cmd_wait "$@";;
+  report) shift; cmd_report "$@";;
+  log) shift; cmd_log "$@";;
+  done) shift; cmd_done "$@";;
+  retro) shift; cmd_retro "$@";;
+  "") usage;;
+  *) echo "orch: unknown command '$1'; see orch --help" >&2; exit 2;;
+esac

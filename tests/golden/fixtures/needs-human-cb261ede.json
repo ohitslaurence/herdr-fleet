@@ -1,0 +1,264 @@
+{
+ "calls": {
+  "files": [
+   "src/f0"
+  ],
+  "prev": {
+   "head": "99046583c5d3805f2bd4420701916034697c0f92",
+   "head_seen_at": "2026-10-17T08:56:42+00:00"
+  },
+  "required": [
+   "check-2",
+   "check-4",
+   "check-5"
+  ]
+ },
+ "expected": {
+  "act": null,
+  "detail": null,
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": [
+   "check-4",
+   "check-5"
+  ],
+  "next": "main requires check-4, check-5, which never started on this head (30+ min); GitHub blocks the merge. Tell the user: the workflow may not run on pull_request, or the requirement is stale",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "needs-human",
+  "tier": null
+ },
+ "now": "2026-10-19T10:49:22.906460+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": null,
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 1,
+  "comments": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "Confidence Score: 4/5\nLast reviewed commit: https://github.com/acme/app/commit/99046583c5d3805f2bd4420701916034697c0f92",
+     "createdAt": "2026-07-15T08:15:29Z",
+     "updatedAt": "2026-07-15T08:15:29Z",
+     "url": "https://example.invalid/url-6"
+    }
+   ]
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-07-15T08:13:52Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 29400063201,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-07-15T08:14:07Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 29400055675,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-2",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-07-15T08:14:06Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 29400063201,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-3",
+          "isRequired": true,
+          "name": "check-2",
+          "startedAt": "2026-07-15T08:14:15Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 29400055675,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-4",
+          "isRequired": true,
+          "name": "check-2",
+          "startedAt": "2026-07-15T08:13:58Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": null
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-5",
+          "isRequired": false,
+          "name": "check-3",
+          "startedAt": "2026-07-15T08:14:07Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-07-15T08:14:00Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f0"
+    }
+   ]
+  },
+  "headRefName": "branch-426",
+  "headRefOid": "99046583c5d3805f2bd4420701916034697c0f92",
+  "isDraft": false,
+  "labels": {
+   "nodes": []
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": null,
+  "mergeStateStatus": "BEHIND",
+  "mergeable": "MERGEABLE",
+  "merged": false,
+  "mergedAt": null,
+  "number": 426,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       }
+      ],
+      "totalCount": 1
+     },
+     "isOutdated": false,
+     "isResolved": false,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "createdAt": "2026-07-15T08:15:33Z"
+       }
+      ]
+     }
+    }
+   ],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": null
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "99046583c5d3805f2bd4420701916034697c0f92"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-07-15T08:15:34Z"
+    }
+   ]
+  },
+  "state": "OPEN",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 426",
+  "url": "https://github.com/acme/app/pull/426"
+ }
+}

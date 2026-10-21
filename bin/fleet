@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""fleet — see and steer a fleet of coding agents running in herdr.
+
+  fleet role <driver|worker|reviewer|advisor> [--author claude|codex] [--json]
+      prints "<kind> <model|-> <effort|->"; reviewer=opposite needs --author
+  fleet roles                       show every resolved role
+  fleet                             the cockpit: what needs you, what's ready to merge (fleet-cockpit)
+  fleet ls [--refresh] [--all] [--json]  the cockpit as plain text (its keys: fleet-cockpit --help)
+  fleet note ["<one sentence>"]     describe this worktree's work for the cockpit
+  fleet new ["<repo, what>"]        start a session from one sentence (ctrl+w t)
+  fleet why [<pane|repo#n|point>] [-n N]   what the decision layer judged, and why
+  fleet why --stats <point>         shadow scorecard: how often Jev agrees with the rule
+  fleet server status|start|stop|restart|install|uninstall|logs   manage the watch service
+  fleet watch [--once] [--dry-run]  merge/deploy watcher + offer auto-reply (fleet-watch)
+  fleet inbox [--json] | done <id> | done --all   what needs you, from fleet watch
+  fleet keys status|set|unset|test [NAME] [--json]   manage private API keys
+  fleet config show [key] [--repo owner/name[@base]] [--json]   every setting and the layer that set it
+  fleet config get <section.key>    one bare value (for shell tools)
+  fleet skills status [--json]      which agent harnesses have the fleet skill, at which version
+  fleet skills install [--to claude,codex,agents,opencode] [--yes]   copy it in (a stamped copy)
+  fleet update [--check] [--json]   move to the newest release, after showing what changes
+  fleet uninstall                   remove what install.sh added (config, keys, state stay)
+  fleet remote serve|scopes|audit|status|logs   read-only fleet access for an agent on your tailnet
+  fleet remote install|uninstall|start|stop|restart   the same, as a user service (docs/remote.md)
+  fleet learn [--repo owner/name] [--days N] [--json]   what craft reviews found and what agents did
+  fleet learn --propose             turn recurring findings into rules, lints and tests to pick from
+  fleet doctor [--json] [--only <id,...>]   check this install end to end; each problem with its fix
+  fleet setup --propose [--json]    read-only: the config it would write for this machine, with evidence
+  fleet setup [apply <file|->]      write it (asks on the terminal; a human's step)
+  fleet version [--json]            this install's version (also --version)
+
+Config: ~/.config/fleet/config.toml (+ team preset); see fleet_config.py.
+"""
+import json, os, sys
+
+def families():
+    """[agents] opposite: roles with kind = "opposite" pick the other of these two."""
+    import fleet_config
+    return tuple(fleet_config.get("agents", "opposite", ["claude", "codex"]))
+
+
+def die(msg, code=1):
+    print(f"fleet: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load():
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import fleet_config
+    try:
+        return fleet_config.load()
+    except RuntimeError as e:
+        die(str(e))
+
+
+def resolve(cfg, role, author=None):
+    r = cfg.get("roles", {}).get(role)
+    if r is None:
+        die(f"unknown role '{role}' (have: {', '.join(cfg.get('roles', {}))})")
+    kind = r.get("kind", "")
+    if kind == "opposite":
+        pair = families()
+        if author not in pair:
+            die(f"role '{role}' is kind=opposite: pass --author {'|'.join(pair)}")
+        kind = next(k for k in pair if k != author)
+    import fleet_config
+    kinds = fleet_config.agent_kinds()
+    if kind not in kinds:
+        die(f"role '{role}' has invalid kind '{kind}' (have: {', '.join(kinds)})")
+    model = r.get("model") or cfg.get("kinds", {}).get(kind, {}).get("model", "")
+    return {"role": role, "kind": kind, "model": model, "effort": r.get("effort", "")}
+
+
+def main(argv):
+    here = os.path.dirname(os.path.realpath(__file__))
+    # help anywhere prints help and does nothing else: agents explore with --help, and
+    # `fleet note --help` must not save a note, `fleet watch --help` must not start a watcher
+    if any(a in ("-h", "--help", "help") for a in argv):
+        print(__doc__.strip())
+        return
+    if argv[:1] == ["keys"]:
+        sys.path.insert(0, here)
+        import fleet_keys
+        return fleet_keys.main(argv[1:])
+    if argv[:1] == ["server"]:
+        import fleet_server
+        sys.exit(fleet_server.main(argv[1:]))
+    if argv[:1] == ["why"]:
+        sys.path.insert(0, here)
+        import fleet_decide
+        rest = [a for a in argv[1:] if not a.startswith("-")]
+        try:
+            n = int(argv[argv.index("-n") + 1]) if "-n" in argv else 20
+        except (IndexError, ValueError):
+            sys.exit("fleet why: -n takes a number, e.g. fleet why -n 5")
+        rest = [a for a in rest if a != str(n)]
+        if "--stats" in argv:
+            print(fleet_decide.stats(" ".join(rest) or "watch.offer"))
+            return
+        got = fleet_decide.why(" ".join(rest), limit=n)
+        print("\n".join(fleet_decide.format_entry(e) for e in got) or "no decisions logged yet")
+        return
+    if argv[:1] == ["skills"]:
+        sys.path.insert(0, here)
+        import fleet_skills
+        sys.exit(fleet_skills.main(argv[1:]))
+    if argv[:1] in (["update"], ["uninstall"]):
+        sys.path.insert(0, here)
+        import fleet_install
+        sys.exit(fleet_install.main(argv))
+    if argv[:1] == ["remote"]:
+        sys.path.insert(0, here)
+        import fleet_remote
+        sys.exit(fleet_remote.main(argv[1:]))
+    if argv[:1] == ["learn"]:
+        sys.path.insert(0, here)
+        import fleet_learn
+        sys.exit(fleet_learn.main(argv[1:]))
+    if argv[:1] in (["version"], ["--version"]):
+        sys.path.insert(0, here)
+        import fleet_version
+        print(json.dumps(fleet_version.info()) if "--json" in argv else fleet_version.line())
+        return
+    if argv[:1] == ["doctor"]:
+        sys.path.insert(0, here)
+        import fleet_doctor
+        sys.exit(fleet_doctor.main(argv[1:]))
+    if argv[:1] == ["setup"]:
+        sys.path.insert(0, here)
+        import fleet_setup
+        sys.exit(fleet_setup.main(argv[1:]))
+    if argv[:1] == ["config"]:
+        sys.path.insert(0, here)
+        import fleet_config
+        try:
+            return fleet_config.main(argv[1:] or ["show"])
+        except RuntimeError as e:
+            die(str(e))
+    if argv[:1] == ["new"]:
+        os.execv(os.path.join(here, "fleet-new"), ["fleet-new", *argv[1:]])
+    if not argv or argv[0] in ("ls", "ui", "note"):
+        os.execv(os.path.join(here, "fleet-cockpit"), ["fleet-cockpit", *argv] if argv[:1] in (["ls"], ["note"]) else ["fleet-cockpit"])
+    if argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = argv[0], argv[1:]
+    if cmd in ("watch", "inbox"):
+        os.execv(os.path.join(here, "fleet-watch"), ["fleet-watch", cmd, *rest])
+    handlers = {"role": cmd_role, "roles": cmd_roles}
+    if cmd not in handlers:
+        die(f"unknown command '{cmd}'; see fleet --help", 2)
+    handlers[cmd](load(), rest)
+
+
+def cmd_role(cfg, rest):
+    if not rest:
+        die("usage: fleet role <name> [--author kind] [--json]", 2)
+    author = rest[rest.index("--author") + 1] if "--author" in rest else None
+    r = resolve(cfg, rest[0], author)
+    if "--json" in rest:
+        print(json.dumps(r))
+    else:
+        print(r["kind"], r["model"] or "-", r["effort"] or "-")
+
+
+def cmd_roles(cfg, rest):
+    for name, r in cfg.get("roles", {}).items():
+        if r.get("kind") == "opposite":
+            for a in families():
+                x = resolve(cfg, name, a)
+                print(f"{name:9} (author {a}) {x['kind']:6} {x['model'] or '-':10} {x['effort'] or '-'}")
+        else:
+            x = resolve(cfg, name)
+            print(f"{name:9} {x['kind']:22} {x['model'] or '-':10} {x['effort'] or '-'}")
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import fleet_term
+    fleet_term.protect_stdout()  # why and learn print agent-, reviewer- and model-written text
+    sys.exit(main(sys.argv[1:]))

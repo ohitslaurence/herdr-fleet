@@ -1,0 +1,52 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    # the README promises Python 3.11+ on Linux and macOS
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: git config --global user.email ci@example.com && git config --global user.name ci
+      # macOS ships bash 3.2; orch needs 4+, as the README says (Homebrew's bin is already ahead
+      # of /bin on the runner's PATH, and behind setup-python's, so python3 stays the matrix's)
+      - if: runner.os == 'macOS'
+        run: brew install bash && bash -c 'echo "bash $BASH_VERSION"'
+      # a file or socket left open fails the run (Python only prints those warnings, so grep for them)
+      - run: |
+          status=0; python3 -m unittest discover -s tests 2> test.log || status=$?
+          cat test.log
+          if grep -q ResourceWarning test.log; then echo "::error::unclosed file or socket above"; exit 1; fi
+          exit $status
+  # Nothing personal or org-specific belongs in this repo: it goes in ~/.config/fleet/config.toml.
+  # The deny-list is a secret so the words it guards aren't published by the check itself.
+  no-personal-values:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - env:
+          DENY: ${{ secrets.PRIVACY_DENYLIST }}
+        run: |
+          if [ -z "$DENY" ]; then echo "PRIVACY_DENYLIST not set (forks): skipping"; exit 0; fi
+          # the repo's own address is allowed (install docs need it); a line is checked again with
+          # it removed, so anything else on that line still fails. CODEOWNERS names the owner by design.
+          repo="${GITHUB_REPOSITORY//./\\.}"
+          hits=$(git grep -n -i -I -E "$DENY" -- . ':!LICENSE' ':!.github/CODEOWNERS' \
+                 | sed -E "s#(github\\.com/)?${repo}##Ig" | grep -i -E "$DENY" || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"; echo "::error::personal or org-specific values above; move them to config.toml"; exit 1
+          fi

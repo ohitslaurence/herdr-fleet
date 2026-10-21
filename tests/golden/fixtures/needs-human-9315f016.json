@@ -1,0 +1,231 @@
+{
+ "calls": {
+  "files": [
+   "src/f0",
+   "protected/f1",
+   "src/f2",
+   "protected/f3",
+   "protected/f4",
+   "protected/f5",
+   "protected/f6",
+   "protected/f7",
+   "protected/f8",
+   "protected/f9",
+   "protected/f10",
+   "protected/f11",
+   "protected/f12",
+   "protected/f13",
+   "protected/f14",
+   "protected/f15",
+   "src/f16",
+   "src/f17",
+   "src/f18",
+   "src/f19"
+  ],
+  "prev": {
+   "head": "67d4ca9f4c6c8d08dd8abb50ba412d72f6f10f6f",
+   "head_seen_at": "2026-10-17T08:56:45+00:00"
+  },
+  "required": [
+   "check-1"
+  ]
+ },
+ "expected": {
+  "act": null,
+  "detail": null,
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": [
+   "check-1"
+  ],
+  "next": "main requires check-1, which never started on this head (30+ min); GitHub blocks the merge. Tell the user: the workflow may not run on pull_request, or the requirement is stale",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "needs-human",
+  "tier": null
+ },
+ "now": "2026-10-19T10:49:25.057585+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": null,
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 20,
+  "comments": {
+   "nodes": [
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "(text)",
+     "createdAt": "2026-06-06T15:53:52Z",
+     "updatedAt": "2026-06-06T15:53:52Z",
+     "url": "https://example.invalid/url-1"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "(text)",
+     "createdAt": "2026-06-06T16:00:40Z",
+     "updatedAt": "2026-06-06T16:00:40Z",
+     "url": "https://example.invalid/url-2"
+    }
+   ]
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-07-20T14:08:14Z",
+      "statusCheckRollup": null
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-06-06T15:47:02Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "DELETED",
+     "path": "src/f0"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f1"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f2"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f3"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f4"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f5"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f6"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f7"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f8"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f9"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f10"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f11"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f12"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f13"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f14"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f15"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "src/f16"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f17"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "src/f18"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "src/f19"
+    }
+   ]
+  },
+  "headRefName": "branch-2",
+  "headRefOid": "67d4ca9f4c6c8d08dd8abb50ba412d72f6f10f6f",
+  "isDraft": false,
+  "labels": {
+   "nodes": []
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": null,
+  "mergeStateStatus": "BLOCKED",
+  "mergeable": "MERGEABLE",
+  "merged": false,
+  "mergedAt": null,
+  "number": 2,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": []
+  },
+  "state": "OPEN",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 2",
+  "url": "https://github.com/acme/app/pull/2"
+ }
+}

@@ -1,0 +1,975 @@
+#!/usr/bin/env python3
+"""fleet new — start a work session from one sentence.
+
+  fleet new                          ask for the sentence (the ctrl+w t popup runs this)
+  fleet new "api, fix the flaky login test" [--yes] [--no-agent] [--agent NAME] [--model ID|NICK] [--no-spare] [--dry-run]
+                                     [--prompt | --no-prompt]
+  The agent starts idle: you give it its first instruction. --prompt (or `p` in the preview, or
+  [new] send_sentence = true) starts it on your sentence instead.
+  fleet new --spares-refresh         build/refresh the spare worktrees (fleet watch runs this)
+  Exits 0 once it has started a session (or jumped to one), 3 when you cancel, 1 on an error.
+  [new] classifier = auto|jev|decisions|haiku  (FLEET_CLASSIFIER overrides once); auto: the first with a key in ~/.config/fleet/env
+                                         (TYPESAFE_API_KEY, OPENAI_API_KEY); each falls back to the next
+
+Repos named in the sentence win. Otherwise TypeSafe Jev picks the repo; the same request
+(~0.4 s, questions answered in parallel) also picks the worktree name from code-made
+candidates, the harness ([roles.driver] unless the sentence names another) and the model (one
+the harness lists, or one of your [models.<nickname>]: "use gpt sol in opencode", "use kimi"),
+and whether an open session is
+already doing this work (then `j` jumps there instead). Decisions API, then Haiku, are the
+fallbacks. Haiku rewrites the one-line description in the background.
+
+Spares: repos listed in [spares] repos (fleet config) keep one ready worktree
+(<repos dir>/.spares/<repo>, fetched, seeded, deps installed). A new session takes it
+(git worktree move + branch rename, ~1 s) and a fresh spare builds in the background.
+Without a spare, `dev` makes the worktree, the install runs in the shell tab, and the
+agent starts at once, told to wait for node_modules/.fleet-ready before tests or builds.
+"""
+import difflib, json, os, re, shlex, subprocess, sys, time
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fleet_config  # noqa: E402
+import fleet_proc  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, count_worktrees, worktree_path  # noqa: E402
+
+STATE_DIR = os.path.expanduser("~/.local/state/fleet")
+NOTES = os.path.join(STATE_DIR, "notes.json")
+SCHEMA = {"type": "object", "additionalProperties": False, "required": ["repos", "slug", "note"],
+          "properties": {"repos": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 4},
+                         "slug": {"type": "string"}, "note": {"type": "string"}}}
+SPARES = os.path.join(STATE_DIR, "spares")
+
+
+def lockfiles():
+    """[(lockfile, install command)] in order: [setup] installs, shared with dev."""
+    return [tuple(x) for x in fleet_config.get("setup", "installs", [])]
+
+
+def default_agent():
+    """[roles.driver] kind: the harness sessions start with unless the sentence names another."""
+    kinds = fleet_config.agent_kinds()
+    kind = (fleet_config.load()["roles"].get("driver") or {}).get("kind")
+    return kind if kind in kinds else next(iter(kinds))
+
+
+def default_model(kind):
+    """The model a harness runs when the sentence names none: the driver role's model for the
+    driver harness, else the harness's own `model`, else whatever the harness picks (None)."""
+    driver = fleet_config.load()["roles"].get("driver") or {}
+    return (driver.get("model") if driver.get("kind") == kind else None) or fleet_config.agent_kinds()[kind].get("model")
+
+
+def agent_argv(kind, model=None):
+    """The command that starts this harness: its cmd, the model, and its permission-bypass flags
+    only with [agents] permissions = "bypass"."""
+    spec = fleet_config.agent_kinds()[kind]
+    model = model or default_model(kind)
+    argv = list(spec["cmd"])
+    if model:
+        argv += [spec.get("model_flag", "--model"), model]
+    if fleet_config.get("agents", "permissions", "ask") == "bypass":
+        argv += list(spec.get("bypass", []))
+    return argv
+
+
+SETUP_NOTE = ("Setup: dependencies are still installing in this workspace's `shell` tab. Before running tests, "
+              "builds or type checks, wait until node_modules/.fleet-ready exists.")
+
+
+def launch_cmd(kind, model, text, send, installing):
+    """The agent's command line. The sentence is its first instruction only when `send`; the setup
+    note rides on the harness's system-prompt flag ([kinds.<k>] system_flag) when it has one, so
+    an idle agent still learns it, and on the instruction otherwise."""
+    cmd = agent_argv(kind, model)
+    flag = fleet_config.agent_kinds()[kind].get("system_flag")
+    if installing and flag:
+        cmd += [flag, SETUP_NOTE]
+    if send:
+        cmd.append(f"{text}\n\n({SETUP_NOTE})" if installing and not flag else text)
+    return cmd
+
+
+MODELS_TTL = 86400
+
+
+def harness_models(kind):
+    """Model ids this harness says it can run: its `models_cmd` output (cached a day), plus its
+    built-in `models`. Empty when it can't say (then only configured nicknames name models)."""
+    spec = fleet_config.agent_kinds()[kind]
+    found = list(spec.get("models", []))
+    cmd = spec.get("models_cmd")
+    if cmd:
+        cache = os.path.join(STATE_DIR, "models", f"{kind}.json")
+        try:
+            with open(cache) as f:
+                c = json.load(f)
+            fresh = time.time() - c["at"] < MODELS_TTL
+        except (OSError, ValueError, KeyError):
+            c, fresh = {"ids": []}, False
+        if not fresh:
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+                ids = [l.strip() for l in p.stdout.splitlines() if re.fullmatch(r"[\w./:@+-]+", l.strip() or "-")]
+                if p.returncode == 0 and ids:
+                    c = {"at": time.time(), "ids": ids}
+                    os.makedirs(os.path.dirname(cache), exist_ok=True)
+                    with open(cache + ".tmp", "w") as f:
+                        json.dump(c, f)
+                    os.replace(cache + ".tmp", cache)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        found += [m for m in c.get("ids", []) if m not in found]
+    return found
+
+
+def nicknames():
+    """[models.<nick>] harness + model: the user's own names for models ("kimi")."""
+    out = {}
+    for nick, m in fleet_config.load().get("models", {}).items():
+        if isinstance(m, dict) and m.get("model") and m.get("harness") in fleet_config.agent_kinds():
+            out[nick] = m
+    return out
+
+
+def named_harness(text):
+    """A harness the sentence names by its own names ("in opencode"), else None."""
+    for kind, spec in fleet_config.agent_kinds().items():
+        words = [kind] + list(spec.get("names", []))
+        if re.search(r"\b(" + "|".join(re.escape(w) for w in words) + r")\b", text, re.I):
+            return kind
+    return None
+
+
+def named_nickname(text):
+    for nick, m in nicknames().items():
+        words = [nick] + list(m.get("names", []))
+        if re.search(r"\b(" + "|".join(re.escape(w) for w in words) + r")\b", text, re.I):
+            return nick
+    return None
+
+
+def model_options():
+    """Jev's model choices: "default", every nickname, and every model each harness lists. Keys
+    are short ids (option text can be anything a harness prints); returns (criteria, key -> pick)."""
+    crit, picks = {"default": "No model or model family is named in the request: use the configured default."}, {}
+    for nick, m in nicknames().items():
+        k = f"n{len(picks)}"
+        crit[k], picks[k] = f"{nick}: the user's name for {m['model']} via {m['harness']}", (m["harness"], m["model"])
+    for kind in fleet_config.agent_kinds():
+        for mid in harness_models(kind):
+            if len(crit) >= 250:
+                break
+            k = f"m{len(picks)}"
+            crit[k], picks[k] = f"{mid} (via {kind})", (kind, mid)
+    return crit, picks
+
+
+def agent_questions():
+    """Jev's harness and model questions, built from config and what each harness lists."""
+    default = default_agent()
+    crit = {}
+    for kind, spec in fleet_config.agent_kinds().items():
+        about = spec.get("about") or kind
+        names = ", ".join([kind] + [n for n in spec.get("names", []) if n != kind])
+        crit[kind] = (f"{about}. The default: choose this unless the request explicitly asks for another harness "
+                      "or for a model only another harness runs." if kind == default else
+                      f"{about}. Only when the request explicitly names this harness ({names}) or a model "
+                      "only it runs.")
+    mcrit, picks = model_options()
+    return ({"agent": {"type": "choice", "instructions": "Which coding agent harness should run this work session?",
+                       "criteria": crit},
+             "model": {"type": "choice", "instructions": "Which model does the request ask the agent to use? "
+                       "Choose default unless the request names a model or model family. When several options "
+                       "fit the name, choose the newest version (highest version number), unless the request "
+                       "names a specific version or variant such as fast or mini.", "criteria": mcrit}},
+            picks)
+
+
+_VERSION = re.compile(r"\d+(?:\.\d+)*")
+
+
+def newest_of_family(model, listed):
+    """The newest listed model of the same family: same id with the version number swapped,
+    e.g. opencode/gpt-5.6-sol -> opencode/gpt-6.1-sol (and -fast stays -fast)."""
+    family = _VERSION.sub("#", model)
+    same = [m for m in listed if _VERSION.sub("#", m) == family]
+
+    def version(m):
+        v = _VERSION.search(m)
+        return tuple(int(x) for x in v.group().split(".")) if v else ()
+    return max(same, key=version) if same else model
+
+
+def resolve_agent(text, jev_harness=None, jev_model=None, picks=None):
+    """-> (harness, model or None for the harness default, warning or None).
+    Precedence: a harness the sentence names, then a nickname's harness, then Jev's harness
+    answer, then [roles.driver]. A model the chosen harness doesn't list gets a warning."""
+    kinds = fleet_config.agent_kinds()
+    nick = named_nickname(text)
+    pick = (picks or {}).get(jev_model) if jev_model and jev_model != "default" else None
+    if pick is None and nick:
+        pick = (nicknames()[nick]["harness"], nicknames()[nick]["model"])
+    harness = named_harness(text) or (pick[0] if pick else None) or \
+        (jev_harness if jev_harness in kinds else None) or default_agent()
+    model, warn = (pick[1] if pick else None), None
+    # a model picked from a harness's list (not a nickname): no version in the sentence means
+    # the newest of that family; a version the user typed is kept
+    if model and not nick and not re.search(r"\d", text):
+        model = newest_of_family(model, harness_models(pick[0]))
+    if model and pick[0] != harness:
+        listed = harness_models(harness)
+        if listed and model not in listed:
+            warn = f"{harness} doesn't list {model}; m picks one it does"
+    return harness, model, warn
+
+
+def die(msg):
+    print(f"fleet new: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(*args, check=True, env=None):
+    p = subprocess.run(args, capture_output=True, text=True, env=env)
+    if check and p.returncode != 0:
+        die(f"{' '.join(args[:3])} failed: {(p.stderr or p.stdout).strip()[-400:]}")
+    return p.stdout
+
+
+def repos():
+    return {r["alias"]: r for r in json.loads(run("dev", "repos", "--json"))["repos"]}
+
+
+def named_in(text, aliases):
+    """Repos the sentence names outright ("web app" counts for web-app)."""
+    t = " " + re.sub(r"[^a-z0-9]+", " ", text.lower()) + " "
+    hits = [(t.find(f" {a.replace('-', ' ')} "), a) for a in aliases]
+    hits = sorted((i, a) for i, a in hits if i >= 0)
+    # "web app" also contains "web": keep the longest name at each spot
+    return [a for i, a in hits if not any(j <= i < j + len(b) and len(b) > len(a) for j, b in hits)]
+
+
+def slugify(s):
+    """Up to 5 words and 32 chars, cut at a word boundary."""
+    out = ""
+    for w in re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-").split("-")[:5]:
+        if out and len(out) + 1 + len(w) > 32:
+            break
+        out = f"{out}-{w}" if out else w[:32]
+    return out
+
+
+def decided(text, aliases):
+    """Repos named in the opening phrase ("api, ..." / "web app + api: ...") or right
+    before/after "repo". Elsewhere a name may be a plain word ("server logs"): the model decides."""
+    head = re.split(r"[,:;—]| - ", text, maxsplit=1)[0]
+    near = " ".join(re.findall(r"([\w-]+(?: [\w-]+)?)\s+repos?\b|\brepos?\s+([\w-]+)", text.lower())
+                    and sum(re.findall(r"([\w-]+(?: [\w-]+)?)\s+repos?\b|\brepos?\s+([\w-]+)", text.lower()), ()))
+    picked = named_in(head, aliases) if len(head.split()) <= 6 else []
+    return list(dict.fromkeys(picked + named_in(near, aliases)))
+
+
+def repo_context(by_alias):
+    """Hints file + how often each repo gets a worktree: the model's only clues when the
+    sentence doesn't name a repo (GitHub descriptions are mostly empty)."""
+    hints = fleet_config.load()["hints"]
+    use = {a: count_worktrees(r["path"], a) for a, r in by_alias.items()}
+    lines = [f"- {a}" + (f": {hints[a]}" if a in hints else "") + (f" ({use[a]} past sessions)" if use[a] else "")
+             for a in sorted(by_alias, key=lambda a: -use[a])]
+    return "\n".join(lines)
+
+
+STOP = set("""a an the and or of to for in on at with from into by about is are was be this that it its
+my our we i me us repo repos please some something stuff thing things look looking into check see why
+how what when where can could should would let lets let's do work working on session new start just quick
+redacted""".split())
+
+
+def quick_slug(text, chosen):
+    """Name from the sentence's own words, no model: drop filler and the repo names."""
+    drop = {w for a in chosen for w in a.split("-")} | STOP
+    words = [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in drop]
+    return slugify("-".join(words[:4])) or "session"
+
+
+KEYS = {}  # filled from fleet_keys.keys(); never copied into os.environ (children would inherit)
+
+
+def load_env():
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from fleet_keys import keys
+    try:
+        KEYS.update(keys())
+    except PermissionError as e:
+        print(f"fleet new: {e}; using rules only", file=sys.stderr)
+
+
+def decisions_repo(text, by_alias, hints, use):
+    """OpenAI Decisions API (gpt-6-luna): one choice question, answered in ~150 ms.
+    It can only choose, not write, so the name and description come from elsewhere."""
+    import urllib.error, urllib.request
+    choices = [{"value": a, "description": (hints.get(a) or f"the {a} repo")
+                + (f" (used in {use[a]} past sessions)" if use.get(a) else "")}
+               for a in sorted(by_alias, key=lambda a: -use.get(a, 0))]
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from fleet_redact import redact
+    body = {"model": "gpt-6-luna", "input": redact(text), "questions": [{
+        "type": "choice", "name": "repo",
+        "instructions": "Which code repository should a developer open to do this work? "
+                        "Prefer the most used fitting repo when unsure.",
+        "choices": choices}]}
+    req = urllib.request.Request("https://api.openai.com/v1/decisions", data=json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {KEYS['OPENAI_API_KEY']}",
+                                          "Content-Type": "application/json"})
+    for attempt in (1, 2):  # beta: occasional 503 "Decision admission timed out"
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                ans = json.load(r)["answers"][0]
+            break
+        except urllib.error.HTTPError as e:
+            if e.code != 503 or attempt == 2:
+                raise
+    if ans.get("type") != "choice":
+        raise ValueError(f"no choice: {ans}")
+    top = sorted(ans.get("probabilities", []), key=lambda x: -x["probability"])[:3]
+    return ans["choice"], ans.get("confidence"), top
+
+
+def slug_candidates(text, chosen):
+    """Code proposes names from the sentence's own words; the model only picks one."""
+    text = re.sub(r"\[REDACTED:[^\]]*\]", " ", text)
+    drop = {w for a in chosen for w in a.split("-")} | STOP
+    words = [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in drop]
+    out = []
+    for n in (5, 4, 3, 2):
+        for i in range(0, max(1, len(words) - n + 1)):
+            c = slugify("-".join(words[i:i + n]))
+            if c and c not in out:
+                out.append(c)
+    return out[:30] or ["session"]
+
+
+def jev_decide(text, by_alias, hints, use, named, sessions=()):
+    """TypeSafe Jev, one request, questions answered in parallel: which repo (unless the
+    sentence named it), which code-made candidate name reads best, which agent, and whether
+    an open session is already this work."""
+    import urllib.error, urllib.request
+    questions, picks = agent_questions()
+    if sessions:
+        questions["same_as"] = {
+            "type": "choice",
+            "instructions": "Is the request in the state the same piece of work that one of these already-running "
+                            "sessions is doing? Choose none unless it is clearly the same task, not just the same "
+                            "area or repository.",
+            "criteria": {"none": "None of them: this is new work.",
+                         **{x["key"]: f"{x['label']}: {x['desc']}" for x in sessions}}}
+    if not named:
+        questions["repo"] = {
+            "type": "choice",
+            "instructions": "Which code repository should a developer open to do the work described in the state? "
+                            "Prefer the most used fitting repository when several could fit.",
+            "criteria": {a: (hints.get(a) or f"the {a} repository")
+                            + (f" (used in {use[a]} past sessions)" if use.get(a) else "")
+                         for a in sorted(by_alias, key=lambda a: -use.get(a, 0))[:255]}}
+    # candidates can't depend on the repo answer (same request), so drop only named repos' words
+    # candidates become option *names* sent to Jev, which redact() doesn't touch: build them
+    # from the redacted sentence so no key fragment can ride along
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from fleet_redact import redact
+    cands = slug_candidates(redact(text), named)
+    if len(cands) > 1:
+        questions["name"] = {
+            "type": "choice",
+            "instructions": "Which option is the clearest short name for the task described in the state, "
+                            "the kind a developer would recognise in a list of work sessions? "
+                            "Prefer names that say what is being done to what.",
+            "criteria": {c: None for c in cands}}
+    if not questions:
+        return {}, 0
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from fleet_redact import redact  # secrets never leave the machine (see fleet_redact.py)
+    from fleet_decide import jev_request
+    req = jev_request(KEYS['TYPESAFE_API_KEY'], text, redact(questions))
+    for attempt in (1, 2):  # 429/529: brief backoff once, then let the caller fall back
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                out = json.load(r)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 529) or attempt == 2:
+                raise
+            time.sleep(0.3)
+    answers = out["answers"]
+    answers["_picks"] = picks  # model option key -> (harness, model id), for resolve_agent
+    return answers, out.get("usage", {}).get("input_tokens", 0)
+
+
+DUP_MIN = 0.5  # probability of "same as an open session" before offering to jump there
+
+
+def jev_classify(text, by_alias, sessions=()):
+    t0 = time.monotonic()
+    named = decided(text, list(by_alias))
+    hints, use = hints_and_use(by_alias)
+    ans, _ = jev_decide(text, by_alias, hints, use, named, sessions)
+    d = {"repos": named, "confidence": None, "alternatives": [], "agent": ans["agent"]["choice"],
+         "model_choice": (ans.get("model") or {}).get("choice"), "picks": ans.get("_picks")}
+    same = ans.get("same_as")
+    if same and same["choice"] != "none" and \
+            same["probabilities"].get(same["choice"], 0) >= fleet_config.get("new", "duplicate_min", DUP_MIN):
+        hit = next(x for x in sessions if x["key"] == same["choice"])
+        d["duplicate"] = dict(hit, prob=same["probabilities"][same["choice"]])
+    if not named:
+        a = ans["repo"]
+        top = sorted(a["probabilities"].items(), key=lambda kv: -kv[1])
+        d.update(repos=[a["choice"]], confidence=a.get("confidence"),
+                 alternatives=[k for k, _ in top[1:3]])
+    d["slug"] = ans["name"]["choice"] if "name" in ans else quick_slug(text, d["repos"])
+    # if the repo wasn't named, its words may still sit in the chosen name: trim them
+    rw = {w for r in d["repos"] for w in r.split("-")}
+    d["slug"] = slugify("-".join(w for w in d["slug"].split("-") if w not in rw)) or d["slug"]
+    d["note"] = " ".join(text.split())[:160]
+    d["polish"] = True
+    d["ms"] = int((time.monotonic() - t0) * 1000)
+    d["via"] = "jev" + ("" if not named else " (repo named in sentence)")
+    return d
+
+
+def hints_and_use(by_alias):
+    hints = fleet_config.load()["hints"]
+    use = {a: count_worktrees(r["path"], a) for a, r in by_alias.items()}
+    return hints, use
+
+
+def fast_classify(text, by_alias):
+    """Named repos win; otherwise one Decisions API call. Name from the sentence, description
+    = the sentence (Haiku polishes it in the background once the session is up)."""
+    t0 = time.monotonic()
+    named = decided(text, list(by_alias))
+    d = {"repos": named, "confidence": None, "alternatives": []}
+    if not named:
+        hints, use = hints_and_use(by_alias)
+        repo, conf, top = decisions_repo(text, by_alias, hints, use)
+        d.update(repos=[repo], confidence=conf, alternatives=[x["value"] for x in top if x["value"] != repo])
+    d["slug"] = quick_slug(text, d["repos"])
+    d["note"] = " ".join(text.split())[:160]
+    d["polish"] = True
+    d["ms"] = int((time.monotonic() - t0) * 1000)
+    d["via"] = "named in sentence" if named else "openai decisions"
+    return d
+
+
+def polish_later(path, text, repos):
+    """Detached: Haiku writes the real one-line description after the session has started."""
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--polish", path, ",".join(repos), text],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def classify(text, aliases, context=""):
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from fleet_redact import redact
+    text = redact(text)
+    hint = decided(text, aliases)
+    maybe = [a for a in named_in(text, aliases) if a not in hint]
+    prompt = (f"A developer wants to start a work session. Their request:\n\"{text}\"\n\n"
+              + (f"The repos are decided: {' '.join(hint)}. Return exactly these as repos and don't mention repos "
+                 "in the note.\n" if hint else
+                 "Known repos, most used first. Pick by what the request is about; when unsure, "
+                 f"prefer one repo, and the most used fitting one:\n{context or ' '.join(sorted(aliases))}\n"
+                 + (f"Words in the request that are also repo names (may just be ordinary words): {' '.join(maybe)}\n"
+                    if maybe else ""))
+              + "Return: repos = the repo(s) to work in (usually one; only from the known list; primary first); "
+                "slug = 2-4 lowercase kebab-case words naming the task, no repo name in it; "
+                "note = one plain-English sentence (max 120 chars) saying what is being done and why, no jargon.")
+    p = None
+    try:
+        p = subprocess.run(["claude", "-p", "--model", "haiku", "--strict-mcp-config", "--setting-sources", "",
+                            "--tools", "", "--output-format", "json", "--json-schema", json.dumps(SCHEMA), prompt],
+                           capture_output=True, text=True, timeout=60, cwd="/tmp")
+        out = json.loads(p.stdout)
+        d = out.get("structured_output") or json.loads(out["result"])
+        d["via"] = "haiku"
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError) as e:
+        # say so: a slug from rules looks like a decision, and the user trusts the routing
+        why = (p.stderr.strip().splitlines() or [p.stdout.strip()[:80]])[0] if p else str(e)
+        d = {"repos": hint, "slug": slugify(text), "note": text[:120],
+             "via": f"rules (haiku unavailable: {why[:80] or 'no output'})"}
+    # repos the sentence names win over the model's guess
+    d["repos"] = hint or [r for r in dict.fromkeys(d.get("repos") or []) if r in aliases]
+    d["slug"] = slugify(d.get("slug") or text)
+    d["note"] = " ".join((d.get("note") or text).split())[:160]
+    return d
+
+
+def open_sessions():
+    """Agent panes that are working on something: what Jev compares a new request against."""
+    try:
+        agents = herdr("agent", "list")["agents"]
+        names = {x["pane_id"]: x.get("label") for x in (lambda r: r.get("panes", r) if isinstance(r, dict) else r)(
+            herdr("pane", "list"))}
+        labels = {w["workspace_id"]: w.get("label") for w in herdr("workspace", "list")["workspaces"]}
+        with open(NOTES) as f:
+            notes = json.load(f)
+    except Exception:
+        return []
+    out = []
+    for a in agents:
+        cwd = a.get("cwd") or ""
+        root = next((p for p in notes if cwd == p or cwd.startswith(p + "/")), None)
+        desc = (notes.get(root) or {}).get("text") or a.get("terminal_title_stripped") or ""
+        label = names.get(a["pane_id"]) or labels.get(a["workspace_id"]) or os.path.basename(cwd)
+        if desc and label:
+            out.append({"key": f"s{len(out) + 1}", "label": label, "desc": desc[:140], "pane": a["pane_id"]})
+    return out[:60]
+
+
+def install_cmd(path):
+    return next((cmd for f, cmd in lockfiles() if os.path.exists(os.path.join(path, f))), None)
+
+
+def lock_hash(path):
+    import hashlib
+    f = next((os.path.join(path, f) for f, _ in lockfiles() if os.path.exists(os.path.join(path, f))), None)
+    return hashlib.sha256(Path(f).read_bytes()).hexdigest()[:16] if f else ""
+
+
+def spare_repos():
+    return fleet_config.get("spares", "repos", [])
+
+
+def spare_path(repo):
+    return os.path.join(os.path.dirname(repo["path"]), ".spares", repo["alias"])
+
+
+def spare_meta(alias, **update):
+    path = os.path.join(SPARES, f"{alias}.json")
+    try:
+        with open(path) as f:
+            m = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        m = {}
+    if update:
+        m.update(update, at=time.time())
+        os.makedirs(SPARES, exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            json.dump(m, f)
+        os.replace(path + ".tmp", path)
+    return m
+
+
+class RepoLock:
+    """One worktree operation per repo at a time: taking the spare, creating a worktree, or
+    building/refreshing the spare. Anyone else waits their turn (wait=True) or skips (wait=False);
+    nobody starts a parallel one. The holder's op is in <alias>.op so waiters can say why."""
+    def __init__(self, alias, op, wait=True):
+        self.alias, self.op, self.wait = alias, op, wait
+        os.makedirs(SPARES, exist_ok=True)
+        self.opfile = os.path.join(SPARES, f"{alias}.op")
+
+    def __enter__(self):
+        import fcntl
+        self.f = open(os.path.join(SPARES, f"{self.alias}.lock"), "w")
+        said = None
+        while True:
+            try:
+                fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if not self.wait:
+                    self.f.close()
+                    return False
+                try:
+                    held = json.loads(Path(self.opfile).read_text())
+                    msg = f"waiting: {self.alias} is busy ({held['op']}, {time.time() - held['since']:.0f}s)"
+                except (OSError, ValueError, KeyError):
+                    msg = f"waiting: {self.alias} is busy"
+                if sys.stdout.isatty() and said is None:
+                    print(msg, flush=True)
+                    said = msg
+                time.sleep(0.5)
+        with open(self.opfile, "w") as f:
+            json.dump({"op": self.op, "pid": os.getpid(), "since": time.time()}, f)
+        return True
+
+    def __exit__(self, *a):
+        try:
+            os.remove(self.opfile)
+        except OSError:
+            pass
+        self.f.close()
+
+
+def git(*args, check=True):
+    return run("git", *args, check=check)
+
+
+def seed(alias, path):
+    """Same as dev's seedWorktree: ~/.config/dev/seed/<alias>/ mirrors the repo (.env etc)."""
+    import shutil
+    src = os.path.expanduser(f"~/.config/dev/seed/{alias}")
+    for root, _, files in os.walk(src):
+        for name in files:
+            to = os.path.join(path, os.path.relpath(os.path.join(root, name), src))
+            if not os.path.exists(to):
+                os.makedirs(os.path.dirname(to), exist_ok=True)
+                shutil.copy2(os.path.join(root, name), to)
+
+
+def build_or_refresh_spare(repo, max_age=20 * 60, wait=False):
+    alias, sp, base = repo["alias"], spare_path(repo), repo.get("defaultBranch") or "main"
+    with RepoLock(alias, "building spare" if not os.path.isdir(sp) else "refreshing spare", wait=wait) as ok:
+        if not ok:
+            return "busy"
+        m = spare_meta(alias)
+        if m.get("ready") and os.path.isdir(sp) and time.time() - m.get("at", 0) < max_age:
+            return "fresh"
+        git("-C", repo["path"], "fetch", "-q", "origin", base)
+        if not os.path.isdir(sp):
+            git("-C", repo["path"], "worktree", "prune", check=False)
+            os.makedirs(os.path.dirname(sp), exist_ok=True)
+            git(*NO_HOOKS, "-C", repo["path"], "worktree", "add", "-q", "-B", f"fleet-spare/{alias}", sp, f"origin/{base}")
+            seed(alias, sp)
+            before = None
+        else:
+            if git("-C", sp, "status", "--porcelain", "--untracked-files=no").strip():
+                git("-C", sp, "reset", "-q", "--hard")
+            before = lock_hash(sp)
+            git("-C", sp, "reset", "-q", "--hard", f"origin/{base}")
+        cmd = install_cmd(sp)
+        if cmd and (before is None or before != lock_hash(sp) or not os.path.isdir(os.path.join(sp, "node_modules"))):
+            p = subprocess.run(cmd, shell=True, cwd=sp, capture_output=True, text=True)
+            if p.returncode != 0:
+                spare_meta(alias, ready=False, error=(p.stderr or p.stdout)[-300:])
+                return "install failed"
+        spare_meta(alias, ready=True, lock=lock_hash(sp), error=None)
+        return "built" if before is None else "refreshed"
+
+
+def take_spare(repo, slug, prefetch=None):
+    """Move the ready spare into place as this session's worktree. Caller holds the RepoLock.
+    Returns (path, install_needed), or None when there's no usable spare (missing, failed, dirty)."""
+    alias, sp, base = repo["alias"], spare_path(repo), repo.get("defaultBranch") or "main"
+    target = worktree_path(repo["path"], alias, slug)
+    m = spare_meta(alias)
+    if not (m.get("ready") and os.path.isdir(sp)):
+        return None
+    if git("-C", sp, "status", "--porcelain", "--untracked-files=no", check=False).strip():
+        return None
+    if prefetch:
+        prefetch.join(timeout=5)
+    before = lock_hash(sp)
+    git("-C", sp, "reset", "-q", "--hard", f"origin/{base}")
+    git("-C", repo["path"], "worktree", "move", sp, target)
+    git(*NO_HOOKS, "-C", target, "checkout", "-q", "-B", branch_name(alias, slug))
+    git("-C", repo["path"], "branch", "-q", "-D", f"fleet-spare/{alias}", check=False)
+    spare_meta(alias, ready=False)
+    return target, before != lock_hash(target)
+
+
+def refill_later(alias):
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--spares-refresh", alias],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def prefetch(by_alias):
+    """While you type: fetch the spare repos so taking a spare needs no network."""
+    import threading
+    def go():
+        for alias in spare_repos():
+            r = by_alias.get(alias)
+            if r and os.path.isdir(spare_path(r)):
+                subprocess.run(["git", "-C", r["path"], "fetch", "-q", "origin", r.get("defaultBranch") or "main"],
+                               capture_output=True)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return t
+
+
+def find_tab(ws, label):
+    return next((t for t in herdr("tab", "list", "--workspace", ws)["tabs"] if t.get("label") == label), None)
+
+
+def tab_pane(ws, label):
+    return pane_of(find_tab(ws, label))
+
+
+def pane_of(tab):
+    if not tab:
+        return None
+    panes = herdr("pane", "list")
+    panes = panes.get("panes", panes) if isinstance(panes, dict) else panes
+    return next((p["pane_id"] for p in panes if p.get("tab_id") == tab["tab_id"]), None)
+
+
+def free_slug(slug, chosen, by_alias):
+    """Don't collide with an existing worktree: dev would reopen it instead."""
+    n, cand = 1, slug
+    while any(os.path.exists(worktree_path(by_alias[a]["path"], a, cand)) for a in chosen):
+        n += 1
+        cand = f"{slug}-{n}"
+    return cand
+
+
+def herdr(*args):
+    return json.loads(run("herdr", *args))["result"]
+
+
+def workspace_for(path):
+    for w in herdr("workspace", "list")["workspaces"]:
+        wt = w.get("worktree") or {}
+        if os.path.realpath(wt.get("checkout_path") or "") == os.path.realpath(path):
+            return w["workspace_id"]
+    return None
+
+
+def focus_session(ws, tab_id):
+    """Show the new session's agent tab. By tab, not `agent focus`: herdr only knows an agent
+    once its CLI is up, seconds after we typed the command, so that finds nothing yet."""
+    try:
+        fleet_proc.herdr("workspace", "focus", ws)
+        if tab_id:
+            fleet_proc.herdr("tab", "focus", tab_id)
+    except fleet_proc.HerdrDown as e:
+        print(f"fleet new: couldn't switch to it ({e})", file=sys.stderr)
+
+
+def set_note(path, text, only_if=None):
+    """Locked write (fleet_state). only_if: replace only while the note still has that text,
+    so the background polish never overwrites a note the agent has since written itself."""
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from fleet_state import update
+
+    def change(notes):
+        if only_if is not None and (notes.get(path) or {}).get("text") != only_if:
+            return
+        notes[path] = {"text": text, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "pane": None,
+                       "by": "fleet new"}
+    update(NOTES, change)
+
+
+CANCELLED = 3  # nothing started: the cockpit stays open (0 means it took you somewhere)
+
+
+def ask(q):
+    try:
+        return input(q)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(CANCELLED)
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return
+    if argv[:1] == ["--polish"]:
+        path, repos_csv, text = argv[1], argv[2], " ".join(argv[3:])
+        d = classify(text, repos_csv.split(","))
+        set_note(path, d["note"], only_if=" ".join(text.split())[:160])
+        return
+    if argv[:1] == ["--spares-refresh"]:
+        by_alias = repos()
+        for alias in (argv[1:] or spare_repos()):
+            if alias in by_alias:
+                # explicit refill after a take waits its turn; the periodic refresh skips busy repos
+                print(f"{alias}: {build_or_refresh_spare(by_alias[alias], max_age=0 if argv[1:] else 20 * 60, wait=bool(argv[1:]))}")
+        return
+    forced = forced_model = None
+    if "--agent" in argv:
+        i = argv.index("--agent")
+        if i + 1 >= len(argv) or argv[i + 1] not in fleet_config.agent_kinds():
+            die(f"--agent takes one of: {', '.join(fleet_config.agent_kinds())}")
+        forced = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+    if "--model" in argv:
+        i = argv.index("--model")
+        if i + 1 >= len(argv):
+            die("--model takes a model id or one of your [models.<nickname>] names")
+        forced_model = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+    flags = {a for a in argv if a.startswith("--")}
+    send = "--prompt" in flags or ("--no-prompt" not in flags and fleet_config.get("new", "send_sentence", False))
+    text = " ".join(a for a in argv if not a.startswith("--")).strip()
+    by_alias = repos()
+    fetching = prefetch(by_alias) if "--dry-run" not in flags else None
+    interactive = sys.stdin.isatty() and "--yes" not in flags
+    if not text:
+        if not sys.stdin.isatty():
+            die("pass the sentence: fleet new \"<repo>, <what you're doing>\"")
+        print("New session. Say which repo(s) and what you're doing, e.g. \"api, fix the flaky login test\".\n")
+        text = ask("› ").strip()
+        if not text:
+            sys.exit(CANCELLED)
+    print("thinking…", end="", flush=True)
+    load_env()
+    backend = os.environ.get("FLEET_CLASSIFIER") or fleet_config.get("new", "classifier", "auto")
+    if backend == "auto":
+        backend = "jev" if KEYS.get("TYPESAFE_API_KEY") else "decisions" if KEYS.get("OPENAI_API_KEY") else "haiku"
+    d = None
+    if backend == "jev":
+        try:
+            d = jev_classify(text, by_alias, open_sessions())
+        except Exception as e:
+            print(f"\r(jev failed: {str(e)[:80]}; trying the next classifier)")
+            backend = "decisions" if KEYS.get("OPENAI_API_KEY") else "haiku"
+    if d is None and backend == "decisions":
+        try:
+            d = fast_classify(text, by_alias)
+        except Exception as e:  # beta API: never block a session on it
+            print(f"\r(decisions api failed: {str(e)[:80]}; using haiku)")
+    if d is None:
+        t0 = time.monotonic()
+        d = classify(text, list(by_alias), repo_context(by_alias))
+        d["ms"] = int((time.monotonic() - t0) * 1000)
+    print("\r", end="")
+    # Jev reads "gpt sol in opencode"; the fallbacks only see harness names and nicknames
+    kind, model, warn = resolve_agent(text, d.get("agent"), d.get("model_choice"), d.get("picks"))
+    if forced_model:
+        nick = nicknames().get(forced_model)
+        kind, model = (nick["harness"], nick["model"]) if nick else (kind, forced_model)
+    if forced and forced != kind:
+        kind, model = forced, (model if model in harness_models(forced) else None)
+    if forced or forced_model:
+        listed = harness_models(kind)
+        warn = f"{kind} doesn't list {model}; m picks one it does" if model and listed and model not in listed else None
+    while True:
+        if not d["repos"]:
+            close = difflib.get_close_matches(text.split(",")[0].strip().lower(), by_alias, n=5, cutoff=0.4)
+            if not interactive:
+                die("couldn't tell which repo" + (f" (close: {', '.join(close)})" if close else ""))
+            got = ask(f"Which repo? {('(' + ', '.join(close) + ') ') if close else ''}› ").split()
+            d["repos"] = [r for r in got if r in by_alias]
+            continue
+        d["slug"] = free_slug(d["slug"], d["repos"], by_alias)
+        conf = f"  {d['confidence']:.0%} sure" if d.get("confidence") is not None else ""
+        alts = ("  (" + " · ".join(f"{i} {a}" for i, a in enumerate(d["alternatives"][:2], 2)) + ")"
+                if d.get("alternatives") else "")
+        print(f"  repo{'s' if len(d['repos']) > 1 else ' '}  {' + '.join(d['repos'])}{conf}{alts}")
+        print(f"  name   {d['slug']}")
+        print(f"  about  {d['note']}" + ("  (Haiku rewrites this in the background)" if d.get("polish") else ""))
+        print(f"  agent  {'none' if '--no-agent' in flags else kind}"
+              + (f" · model {model or 'default'}" if '--no-agent' not in flags else "")
+              + (f", starting on: \"{text}\"" if send else ", waiting for your first instruction"))
+        if warn:
+            print(f"  ⚠ {warn}")
+        sp = (len(d["repos"]) == 1 and "--no-spare" not in flags and d["repos"][0] in spare_repos()
+              and spare_meta(d["repos"][0]).get("ready"))
+        print(f"  setup  {'spare worktree ready (~1 s)' if sp else 'new worktree; deps install while the agent starts'}")
+        dup = d.get("duplicate")
+        if dup:
+            print(f"\n  ⚠ looks like work already open: {dup['label']}: {dup['desc'][:90]}  ({dup['prob']:.0%})")
+        print()
+        if "--dry-run" in flags:
+            print(f"(decided in {d.get('ms', '?')} ms via {d.get('via')}; dry run, nothing created)")
+            return
+        if not interactive:
+            break
+        unsure = d.get("confidence") is not None and d["confidence"] < 0.6
+        a = ask(("j jumps to that session · " if dup else "")
+                + ("not sure of the repo: 2/3 picks the alternative · " if unsure else "")
+                + "enter = go · r repos · n name · d description · a agent · m model · "
+                + ("p don't send the sentence" if send else "p start it on the sentence") + " · q cancel › ").strip().lower()
+        if a == "j" and dup:
+            run("herdr", "agent", "focus", dup["pane"], check=False)
+            return
+        if a == "p":
+            send = not send
+            continue
+        if a == "a":  # cycle through every configured harness; its default model goes with it
+            kinds = list(fleet_config.agent_kinds())
+            kind = kinds[(kinds.index(kind) + 1) % len(kinds)] if kind in kinds else kinds[0]
+            model, warn = None, None
+            continue
+        if a == "m":  # pick a model this harness lists, or one of your nicknames
+            nicks = {n: m for n, m in nicknames().items() if m["harness"] == kind}
+            options = list(nicks) + harness_models(kind)
+            want = ask(f"model for {kind} (part of a name; enter = default; {len(options)} known) › ").strip()
+            if not want:
+                model, warn = None, None
+                continue
+            hits = [o for o in options if want.lower() in o.lower()]
+            if len(hits) == 1 or want in options:
+                pick = want if want in options else hits[0]
+                model, warn = (nicks[pick]["model"] if pick in nicks else pick), None
+            else:
+                print(f"  {len(hits)} match: " + (", ".join(hits[:12]) or "none; it may still work if the harness knows it"))
+                if not hits and ask(f"use {want!r} anyway? [y/N] › ").strip().lower() == "y":
+                    model, warn = want, f"{kind} doesn't list {want}"
+            continue
+        if a in ("2", "3") and len(d.get("alternatives") or []) >= int(a) - 1:
+            pick = d["alternatives"][int(a) - 2]
+            d["alternatives"] = [x for x in [d["repos"][0]] + d["alternatives"] if x != pick]
+            d["repos"], d["confidence"] = [pick], None
+            continue
+        if a in ("", "y", "go"):
+            break
+        if a == "q":
+            sys.exit(CANCELLED)
+        if a == "r":
+            d["repos"] = [r for r in ask("repos (space separated) › ").split() if r in by_alias] or d["repos"]
+        elif a == "n":
+            d["slug"] = slugify(ask("name › ")) or d["slug"]
+        elif a == "d":
+            d["note"] = ask("description › ").strip() or d["note"]
+            d["polish"] = False
+
+    t_create = time.monotonic()
+    env = dict(os.environ, DEV_NO_FOCUS="1", DEV_SKIP_INSTALL="1")
+    primary = worktree_path(by_alias[d["repos"][0]]["path"], d["repos"][0], d["slug"])
+    installs = []  # (worktree, command) run in the shell tab while the agent starts
+    took = None
+    from contextlib import ExitStack
+    with ExitStack() as held:
+        # one worktree operation per repo: wait for a spare being built/refreshed, then take it;
+        # sorted so two cross-repo sessions can't deadlock
+        for r in sorted(d["repos"]):
+            held.enter_context(RepoLock(r, f"starting session {d['slug']}", wait=True))
+        if len(d["repos"]) == 1 and "--no-spare" not in flags and d["repos"][0] in spare_repos():
+            took = take_spare(by_alias[d["repos"][0]], d["slug"], fetching)
+        if took:
+            print("taking the spare worktree…", flush=True)
+            primary, stale_deps = took
+            run("dev", d["repos"][0], d["slug"], env=env)  # existing checkout: dev just opens workspace + tabs
+            if stale_deps:
+                installs.append((primary, install_cmd(primary)))
+        else:
+            print("creating worktree…", flush=True)
+            if len(d["repos"]) == 1:
+                run("dev", d["repos"][0], d["slug"], env=env)
+            else:
+                run("dev", "cross", d["slug"], *d["repos"], env=env)
+            for r in d["repos"]:
+                wt = worktree_path(by_alias[r]["path"], r, d["slug"])
+                if install_cmd(wt):
+                    installs.append((wt, install_cmd(wt)))
+    # lock released: the next free worktree builds behind it (and waits for anyone who got in first)
+    for r in d["repos"]:
+        if r in spare_repos() and not spare_meta(r).get("ready"):
+            refill_later(r)
+    set_note(primary, d["note"])
+    if d.get("polish"):
+        polish_later(primary, text, d["repos"])
+    ws = workspace_for(primary)
+    if not ws:
+        die(f"worktree made at {primary} but no herdr workspace found for it")
+    shell = tab_pane(ws, "shell")
+    if installs and shell:
+        steps = " && ".join(f"(cd {shlex.quote(wt)} && {cmd} && touch node_modules/.fleet-ready)"
+                            for wt, cmd in installs)
+        run("herdr", "pane", "run", shell, steps)
+    agent_tab = find_tab(ws, "agent")
+    pane = pane_of(agent_tab)
+    if pane and "--no-agent" not in flags:
+        # typed into the tab's shell; the pty buffers it if zsh is still starting
+        run("herdr", "pane", "run", pane, shlex.join(launch_cmd(kind, model, text, send, bool(installs))))
+    if "--no-focus" not in flags:
+        focus_session(ws, agent_tab and agent_tab["tab_id"])
+    how = "spare" if took else "new worktree"
+    print(f"started {d['slug']} in {primary}  ({how}, ready in {time.monotonic() - t_create:.1f} s; "
+          f"decided in {d.get('ms', '?')} ms via {d.get('via')})")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

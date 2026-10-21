@@ -1,0 +1,222 @@
+{
+ "calls": {
+  "deploy:03bdc7aab6a9999d37a9bc8b63898a69676141c6": [
+   "deploy-gated",
+   "word-1 word-2 word-3 word-4 word-5"
+  ],
+  "files": [
+   "protected/f0",
+   "src/f1",
+   "src/f2",
+   "src/f3",
+   "src/f4",
+   "src/f5"
+  ],
+  "prev": {
+   "head": "8c6577ac490b97025e7a0d42ed1e33c1e0c01aea",
+   "review": {
+    "critical_impact": false,
+    "findings_by_round": [],
+    "present": true,
+    "provider": "greptile",
+    "retag_pending": false,
+    "retag_unanswered": false,
+    "reviewed_head": true,
+    "reviewed_sha": "8c6577ac490b97025e7a0d42ed1e33c1e0c01aea",
+    "rounds": 0,
+    "score": 5
+   }
+  }
+ },
+ "expected": {
+  "act": null,
+  "detail": "word-1 word-2 word-3 word-4 word-5",
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": null,
+  "next": "human: a deploy is waiting for environment approval in GitHub",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "deploy-gated",
+  "tier": null
+ },
+ "now": "2026-10-19T10:48:58.827805+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": "critical",
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 6,
+  "comments": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "greptile_confidence_score:5\nConfidence Score: 5/5\nLast reviewed commit: https://github.com/acme/app/commit/8c6577ac490b97025e7a0d42ed1e33c1e0c01aea",
+     "createdAt": "2026-10-17T06:45:45Z",
+     "updatedAt": "2026-10-17T06:45:48Z",
+     "url": "https://example.invalid/url-4"
+    }
+   ]
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-10-17T06:41:29Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 39010981917,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-17T06:43:50Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 39010975120,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-2",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-17T06:43:45Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": null
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-3",
+          "isRequired": false,
+          "name": "check-2",
+          "startedAt": "2026-10-17T06:43:47Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-10-17T06:43:41Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "MODIFIED",
+     "path": "protected/f0"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f1"
+    },
+    {
+     "changeType": "DELETED",
+     "path": "src/f2"
+    },
+    {
+     "changeType": "DELETED",
+     "path": "src/f3"
+    },
+    {
+     "changeType": "DELETED",
+     "path": "src/f4"
+    },
+    {
+     "changeType": "DELETED",
+     "path": "src/f5"
+    }
+   ]
+  },
+  "headRefName": "branch-101",
+  "headRefOid": "8c6577ac490b97025e7a0d42ed1e33c1e0c01aea",
+  "isDraft": false,
+  "labels": {
+   "nodes": [
+    {
+     "name": "agent:claude"
+    }
+   ]
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": {
+   "oid": "03bdc7aab6a9999d37a9bc8b63898a69676141c6"
+  },
+  "mergeStateStatus": "UNKNOWN",
+  "mergeable": "UNKNOWN",
+  "merged": true,
+  "mergedAt": "2026-10-17T06:58:26Z",
+  "number": 101,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": []
+  },
+  "state": "MERGED",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 101",
+  "url": "https://github.com/acme/app/pull/101"
+ }
+}

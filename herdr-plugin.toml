@@ -1,0 +1,42 @@
+id = "herdr-fleet"
+name = "Fleet cockpit"
+version = "0.4.0"
+min_herdr_version = "0.9.0"
+description = "One screen for the agent fleet: what needs you, what's ready to merge, what's stalled"
+platforms = ["linux", "macos"]
+
+# `herdr plugin install` previews this, then runs it: links the commands into ~/.local/bin (herdr
+# owns the plugin itself). `fleet uninstall` removes the links; `herdr plugin uninstall herdr-fleet`
+# removes the plugin and this copy.
+[[build]]
+command = ["sh", "install.sh", "--yes", "--from-herdr"]
+
+# Popup over everything; `q` closes it, enter jumps to the selected pane.
+[[panes]]
+id = "cockpit"
+title = "Fleet"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["bash", "-lc", "exec fleet-cockpit"]
+
+[[actions]]
+id = "open"
+title = "Open fleet cockpit"
+contexts = ["workspace"]
+command = ["bash", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin herdr-fleet --entrypoint cockpit"]
+
+# ctrl+w t: start a session from one sentence (fleet new)
+[[panes]]
+id = "new"
+title = "New session"
+placement = "popup"
+width = "70%"
+height = "40%"
+command = ["bash", "-lc", "exec fleet-new"]
+
+[[actions]]
+id = "new"
+title = "New session from a sentence"
+contexts = ["workspace"]
+command = ["bash", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin herdr-fleet --entrypoint new"]

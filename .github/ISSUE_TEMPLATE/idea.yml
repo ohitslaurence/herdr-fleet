@@ -1,0 +1,14 @@
+name: Idea
+description: A change or new feature. Please start here before a large PR.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do and where the fleet got in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd change

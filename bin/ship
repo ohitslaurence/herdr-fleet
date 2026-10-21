@@ -1,0 +1,1516 @@
+#!/usr/bin/env python3
+"""ship — own a PR's lifecycle, for any agent harness or a human.
+
+  ship [<pr>] [--act] [--wait [SECS]] [--json]
+      <pr>: URL, number (in a repo), or omitted (PR of the current branch)
+      prints the PR's state and the ONE next action. Reads the PR from GitHub on
+      every run. Local state (~/.local/state/fleet) only holds what GitHub can't be
+      trusted with: which review comments ship posted, free-review attempts, and the
+      highest paid-review count seen.
+      --act   also perform the mechanical next step (ask the review bot, mark ready,
+              merge when policy allows, label). Code changes stay with the agent.
+      --wait  poll until the PR leaves a waiting state (CI running, review
+              pending, deploying) or SECS pass (default 1800), then print.
+  ship pr [<ref>...]    instant facts: open/merged/closed, when, by whom, CI, mergeability.
+                       <ref>: URL, repo#n, owner/repo#n, number, or search text (title/branch).
+                       Run this before telling anyone a PR is open, merged, or needs merging.
+  ship review [<pr>] [--dry-run]  run a free, fresh-context review by the other model family now
+  ship rescue [<pr>]   hand a non-converging PR to a fresh agent of the other family (orch)
+  ship policy [<repo>] print the merged policy for a repo
+  ship findings [<pr>] [--json]   the craft review's findings (kept locally, never on the PR)
+  ship findings [<pr>] <id>... fixed|dismissed "<why>"   give findings a verdict
+  ship guide <topic>   how to do what a `next:` line asks, from the skill shipped with ship:
+                       loop, findings, self-review, terminal, craft, prc, rescue, replies
+
+Loop for agents: run `ship --act --wait`, do what `next` says, repeat until
+the state is terminal (deployed, awaiting-human, needs-human, closed).
+
+Policy: the fleet config, [ship] + [protect] + [repos.<name>] + the repo's .fleet.toml on its base
+branch (tighten-only). `fleet config show ship --repo owner/name` prints it with sources.
+Ledger: ~/.local/state/fleet/ledger/<owner>__<repo>__<n>.json (latest state per PR).
+"""
+from concurrent.futures import ThreadPoolExecutor
+import argparse, difflib, shutil, fnmatch, json, os, re, subprocess, sys, tempfile, time
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fleet_proc as proc  # noqa: E402
+import fleet_review as R  # noqa: E402
+import fleet_craft  # noqa: E402
+from fleet_paths import NO_HOOKS  # noqa: E402
+
+# Fixed, like the policy: the ledger, review-request log and free-review counters here are what
+# budget paid reviews, and an agent could otherwise point ship at a fresh dir and reset them.
+# Tests set the module attribute after loading.
+STATE_DIR = os.path.expanduser("~/.local/state/fleet")
+CI_GRACE_MIN = 3             # a head this new with no checks yet: CI hasn't registered, not "green"
+REQUIRED_START_MIN = 30      # a required check still absent this long after the head appeared won't start
+RESCUE_MARK = re.compile(r"<!-- fleet-rescue sha=([0-9a-f]{7,40}) -->")
+SELF_MARK = re.compile(r"<!-- fleet-self-review sha=([0-9a-f]{7,40}) -->")
+REVIEW_MARK = re.compile(r"<!-- fleet-review sha=([0-9a-f]{7,40}) verdict=(clean|findings) -->")
+WAITING = {"ci-running", "review-pending", "deploying", "cross-reviewing"}
+AFTER_DEPLOY_TIMEOUT_S = 600
+AFTER_DEPLOY_TAIL = 300  # characters of a failed run's output kept in the ledger
+TERMINAL = {"churn", "deployed", "awaiting-human", "needs-human", "closed", "deploy-failed", "deploy-gated"}
+
+
+
+def skill_file(name, skill="ship"):
+    """A skill file shipped with this script (skills/<skill>/), so it always matches the binary."""
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "skills", skill, name)
+
+
+# `ship guide <topic>`: the part of the shipped skill a `next:` line points at.
+# topic: (skill, heading that starts the section, or None for the whole file)
+GUIDES = {
+    "loop": ("ship", "## Loop"),
+    "findings": ("ship", "## Working findings"),
+    "self-review": ("ship", "## Self-review"),
+    "terminal": ("ship", "## Stop only at a terminal state"),
+    "craft": ("ship", "## Craft review"),
+    "replies": ("prc", "### Reacting to comments"),
+    "prc": ("prc", None),
+    "rescue": ("ship", "## Rescue"),
+}
+
+
+def guide_text(topic):
+    skill, heading = GUIDES[topic]
+    with open(skill_file("SKILL.md", skill)) as f:
+        text = f.read()
+    if text.startswith("---"):
+        text = text.split("---", 2)[2]  # drop the frontmatter
+    if heading:
+        start = text.index(heading)
+        end = text.find("\n## ", start + len(heading))
+        text = text[start:end if end >= 0 else None]
+    return text.strip() + "\n"
+
+
+def commit_hint():
+    """How to commit and open a PR here: gritty when installed, else plain git and gh."""
+    if shutil.which("gritty"):
+        return "commit (`gritty commit --accept`), push, open the PR as a draft (`gritty pr --accept --draft`)"
+    return "commit (`git commit`), push, open the PR as a draft (`gh pr create --fill --draft`)"
+
+
+def die(msg, code=1):
+    print(f"ship: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run(*args, check=True):
+    p = proc.run(args)
+    if check and p.returncode != 0:
+        die(f"{' '.join(args[:3])}… failed: {p.stderr.strip()[:400]}")
+    return p.stdout
+
+
+def gh_json(*args):
+    out = run("gh", *args)
+    return json.loads(out) if out.strip() else None
+
+
+# ── PR resolution ────────────────────────────────────────────────────────────
+
+def resolve_pr(arg):
+    if arg and (m := re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)(?:[/?#].*)?", arg)):
+        return m.group(1), m.group(2), int(m.group(3))
+    sel = [arg] if arg else []
+    d = gh_json("pr", "view", *sel, "--json", "number,url")
+    if not d:
+        return None
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", d["url"])
+    return m.group(1), m.group(2), int(m.group(3))
+
+
+Q = """query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){
+ number url title state isDraft merged mergedAt createdAt mergeCommit{oid} headRefName headRefOid baseRefName
+ mergeable mergeStateStatus reviewDecision changedFiles
+ labels(first:30){nodes{name}} files(first:100){nodes{path changeType}}
+ latestOpinionatedReviews(first:30){nodes{state commit{oid} author{login}}}
+ commits(last:1){nodes{commit{committedDate statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename
+   ... on CheckRun{name status conclusion detailsUrl startedAt isRequired(pullRequestNumber:$n)
+                   checkSuite{workflowRun{databaseId workflow{name}}}}
+   ... on StatusContext{context state targetUrl isRequired(pullRequestNumber:$n)}}}}}}}
+ reviews(last:100){nodes{author{login} state commit{oid} body submittedAt comments(first:20){totalCount nodes{replyTo{id}}}}}
+ reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved isOutdated
+   comments(first:2){totalCount nodes{author{login} body}} last: comments(last:1){nodes{createdAt author{login}}}}}
+ comments(last:100){nodes{url author{login} body createdAt updatedAt}}
+ timelineItems(last:1,itemTypes:[READY_FOR_REVIEW_EVENT]){nodes{... on ReadyForReviewEvent{createdAt}}}
+}}}"""
+
+
+def fetch(o, r, n):
+    d = gh_json("api", "graphql", "-f", f"query={Q}", "-F", f"o={o}", "-F", f"r={r}", "-F", f"n={n}")
+    if not d or d.get("errors") or not ((d.get("data") or {}).get("repository") or {}).get("pullRequest"):
+        die(f"GitHub returned no usable PR data for {o}/{r}#{n}: "
+            f"{json.dumps((d or {}).get('errors') or d)[:300]}")
+    return d["data"]["repository"]["pullRequest"]
+
+
+def truncated(pr):
+    """Lists GitHub cut off at 100: past that, a failing check or open finding would be
+    invisible and the PR would read as clean. Fail closed."""
+    nodes = pr["commits"]["nodes"]
+    roll = (nodes[0]["commit"]["statusCheckRollup"] or {}) if nodes else {}
+    cut = []
+    if ((roll.get("contexts") or {}).get("pageInfo") or {}).get("hasNextPage"):
+        cut.append("checks")
+    if ((pr["reviewThreads"].get("pageInfo")) or {}).get("hasNextPage"):
+        cut.append("review threads")
+    return cut
+
+
+# ── policy ───────────────────────────────────────────────────────────────────
+
+def load_policy(repo, owner=None, base=None):
+    """[ship] policy for this repo, from fleet_config (with the repo's tighten-only .fleet.toml
+    when owner and base are known)."""
+    import fleet_config
+    return fleet_config.ship_policy(repo, owner, base)
+
+
+def human_files(files, globs):
+    """Case-insensitive: `*payment*` must catch PaymentCard.tsx and src/Ledger/."""
+    globs = [g.lower() for g in globs]
+    return [f for f in files if any(fnmatch.fnmatch(f.lower(), g) for g in globs)]
+
+
+def pr_files(o, r, n, pr):
+    """Every path the PR touches, including the old side of renames (moving a file out of
+    a human path must not escape it). GraphQL caps at 100 and has no old path: use REST then."""
+    nodes = pr["files"]["nodes"]
+    if pr.get("changedFiles", 0) <= len(nodes) and not any(f.get("changeType") == "RENAMED" for f in nodes):
+        return [f["path"] for f in nodes]
+    out = run("gh", "api", "--paginate", f"repos/{o}/{r}/pulls/{n}/files?per_page=100",
+              "-q", ".[] | .filename, (.previous_filename // empty)")
+    return sorted(set(out.splitlines()))
+
+
+# ── state machine ────────────────────────────────────────────────────────────
+
+def checks_of(pr, head_seen_at=None, required=None, now=None, grace_min=CI_GRACE_MIN,
+              required_start_min=REQUIRED_START_MIN):
+    """-> {pending, failing, cancelled (run ids), optional_failing, all_pending}. Latest run per
+    workflow+check wins: two workflows that both have a `build` job must not hide each other's
+    failures.
+    required: names the base branch requires (branch protection + rulesets). When known and
+    non-empty, only those (and checks GitHub marks isRequired) gate: an optional red check is
+    reported, not blocking, and a required check that hasn't started yet is pending. Unknown or
+    none required: every check gates.
+    head_seen_at: when ship first saw this head. The commit date is no clock for CI: a commit
+    made an hour ago and pushed now has no checks yet, and that is not "green"."""
+    nodes = pr["commits"]["nodes"]
+    roll = nodes[0]["commit"]["statusCheckRollup"] if nodes else None
+    ctxs = (roll or {}).get("contexts", {}).get("nodes", [])
+    since = head_seen_at or (nodes[0]["commit"]["committedDate"] if nodes else None)
+    if not ctxs and nodes and since and age_minutes(since, now) < grace_min:
+        return {"pending": ["(CI not registered yet)"], "failing": [], "cancelled": [], "optional_failing": [],
+                "all_pending": ["(CI not registered yet)"], "never_started": []}
+    latest = {}
+    for c in ctxs:
+        wf = (((c.get("checkSuite") or {}).get("workflowRun") or {}).get("workflow") or {}).get("name")
+        name = c.get("name") or c.get("context")
+        key = f"{wf} / {name}" if wf else name
+        if key not in latest or (c.get("startedAt") or "") >= (latest[key].get("startedAt") or ""):
+            latest[key] = c
+    gate_all = not required
+    pending, failing, cancelled, optional_failing, all_pending = [], [], set(), [], []
+    for name, c in latest.items():
+        gates = gate_all or c.get("isRequired") is True or (c.get("name") or c.get("context")) in required
+        bad = None
+        if c["__typename"] == "CheckRun":
+            url = c.get("detailsUrl")
+            if c["status"] != "COMPLETED":
+                all_pending.append(name)
+                if gates:
+                    pending.append(name)
+            elif c["conclusion"] == "CANCELLED":
+                run_id = ((c.get("checkSuite") or {}).get("workflowRun") or {}).get("databaseId")
+                if run_id and gates:
+                    cancelled.add(run_id)
+                elif not run_id:
+                    bad = f"{name} cancelled ({url})"
+            elif c["conclusion"] in ("FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"):
+                bad = f"{name} ({url})"
+        else:
+            if c["state"] in ("PENDING", "EXPECTED"):
+                all_pending.append(name)
+                if gates:
+                    pending.append(name)
+            elif c["state"] in ("FAILURE", "ERROR"):
+                bad = f"{name} ({c.get('targetUrl')})"
+        if bad:
+            (failing if gates else optional_failing).append(bad)
+    never_started = []
+    if not gate_all:
+        seen = {c.get("name") or c.get("context") for c in latest.values()}
+        missing = sorted(required - seen)
+        if missing and since and age_minutes(since, now) >= required_start_min:
+            never_started = missing  # e.g. its workflow doesn't run on pull_request
+        else:
+            pending += [f"{x} (required, not started)" for x in missing]
+            all_pending += [f"{x} (required, not started)" for x in missing]
+    return {"pending": pending, "failing": failing, "cancelled": sorted(cancelled),
+            "optional_failing": optional_failing, "all_pending": all_pending, "never_started": never_started}
+
+
+def required_checks(o, r, base, max_age=600):
+    """Check names the base branch requires: classic branch protection plus rulesets. Both read
+    with repo read access. Cached 10 min. None when GitHub can't say (then every check gates)."""
+    cache = os.path.join(STATE_DIR, "required-checks.json")
+    try:
+        with open(cache) as f:
+            c = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        c = {}
+    key = f"{o}/{r}@{base}"
+    hit = c.get(key)
+    if hit and time.time() - hit["at"] < max_age:
+        return set(hit["names"])
+    names = set()
+    p = proc.run(["gh", "api", f"repos/{o}/{r}/branches/{base}"])
+    q = proc.run(["gh", "api", f"repos/{o}/{r}/rules/branches/{base}"])
+    try:
+        prot = (json.loads(p.stdout).get("protection") or {}).get("required_status_checks") or {}
+        names |= set(prot.get("contexts") or [])
+        for rule in json.loads(q.stdout):
+            if rule.get("type") == "required_status_checks":
+                names |= {x["context"] for x in (rule.get("parameters") or {}).get("required_status_checks", [])}
+    except (ValueError, AttributeError, KeyError, TypeError):
+        return None
+    if p.returncode != 0 or q.returncode != 0:
+        return None
+    c[key] = {"at": time.time(), "names": sorted(names)}
+    write_json(cache, c)
+    return names
+
+
+def age_minutes(iso, now=None):
+    now = now or datetime.now(timezone.utc)
+    return (now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds() / 60
+
+
+
+def finding_bots(pol):
+    return R.FINDING_BOTS + tuple((pol or {}).get("finding_bots") or ())
+
+
+def open_bot_threads(pr, bots, prov=None):
+    """Bot findings nobody has dealt with: unresolved, no reply. Outdated P0/P1 still count:
+    editing the flagged line is not the same as answering the finding.
+    A reply is not a fix either: answered-but-unresolved P0/P1 threads are listed in
+    "answered" (time of the last reply) so review_state can require a bot review after it
+    ("won't fix" on a P0 must not clear the gate by itself).
+    -> {"P0": n, "P1": n, "P2": n, "other": n, "answered": [iso, ...]}"""
+    sev = {"P0": 0, "P1": 0, "P2": 0, "other": 0, "answered": []}
+    for t in pr["reviewThreads"]["nodes"]:
+        cs = t["comments"]
+        first = (cs["nodes"] or [{}])[0]
+        login = (first.get("author") or {}).get("login") or ""
+        # every known review bot counts, configured or not: extra findings only ever block more,
+        # so a loose bot match is safe here
+        if t["isResolved"] or not any(b in login for b in bots):
+            continue
+        if cs["totalCount"] > 1:
+            if re.search(r'alt="(P[01])"', first.get("body") or ""):
+                last = ((t.get("last") or {}).get("nodes") or [{}])[0]
+                sev["answered"].append(last.get("createdAt") or "")
+            continue
+        level = (prov or R.Provider()).severity(first.get("body"))
+        if t["isOutdated"] and level not in ("P0", "P1"):
+            continue
+        sev[level] += 1
+    return sev
+
+
+def lines_since(o, r, base_sha, head_sha, base_ref):
+    """Added/removed lines of the PR's own diff that changed since base_sha was reviewed.
+
+    Compares the PR's patch (vs its base branch) at both commits, so merging or rebasing
+    onto a newer base doesn't count the base's changes. None = unknown: treat as big."""
+    if not base_sha:
+        return None
+    if base_sha == head_sha:
+        return 0
+    patches = []
+    for sha in (base_sha, head_sha):
+        p = proc.run(["gh", "api", f"repos/{o}/{r}/compare/{base_ref}...{sha}"])
+        try:
+            d = json.loads(p.stdout) if p.returncode == 0 else None
+        except json.JSONDecodeError:
+            d = None
+        if not d or "files" not in d or len(d["files"]) >= 300:
+            return None
+        files = {}
+        for f in d["files"]:
+            if f.get("patch") is None and f.get("changes"):
+                files[f["filename"]] = [f"<no patch: {f.get('sha')}>"]  # too big to diff: compare blob ids
+            else:
+                files[f["filename"]] = [l for l in (f.get("patch") or "").splitlines() if l[:1] in ("+", "-")]
+        patches.append(files)
+    old, new = patches
+    delta = 0
+    for name in old.keys() | new.keys():
+        a, b = old.get(name, []), new.get(name, [])
+        if any(l.startswith("<no patch") for l in a + b) and a != b:
+            return None
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        delta += sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal")
+    return delta
+
+
+def markers(pr, rx):
+    return [m.group(1) for c in pr["comments"]["nodes"] if (m := last_match(rx, c["body"]))]
+
+
+def last_match(rx, body):
+    ms = list(rx.finditer(body or ""))
+    return ms[-1] if ms else None
+
+
+def requests_path(repo_full, n):
+    return os.path.join(STATE_DIR, "review-requests", f"{repo_full.replace('/', '__')}__{n}.jsonl")
+
+
+def review_requests(repo_full, n, provider):
+    """Review requests ship made on this PR (append-only, written when it asks): the count of
+    paid rounds that deleting a request comment can't lower."""
+    try:
+        with open(requests_path(repo_full, n)) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        return []
+    return [x for x in rows if x.get("provider") == provider]
+
+
+def remember_request(repo_full, n, provider, head, url):
+    path = requests_path(repo_full, n)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "provider": provider,
+                            "head": head, "url": url}) + "\n")
+
+
+def posted_path(repo_full, n):
+    return os.path.join(STATE_DIR, "posted", f"{repo_full.replace('/', '__')}__{n}.json")
+
+
+def posted_by_ship(repo_full, n):
+    """URLs of the review comments ship itself posted. Markers in any other comment are
+    ignored, so an agent (or a reviewer quoting one) can't fake a clean cross-review."""
+    try:
+        with open(posted_path(repo_full, n)) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+
+def remember_posted(repo_full, n, url):
+    urls = posted_by_ship(repo_full, n) | {url.strip()}
+    write_json(posted_path(repo_full, n), sorted(urls))
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
+
+
+def same_change(f, sha):
+    """The PR's own diff at sha is the same as at head (only the base moved in between)."""
+    head = f.pr["headRefOid"]
+    if head.startswith(sha) or sha.startswith(head[:7]):
+        return True
+    return len(sha) == 40 and f.lines_since(sha, head) == 0
+
+
+def churning(g):
+    """Paid reviews keep finding as much as or more than last time: fixes are making new bugs."""
+    f = g["findings_by_round"]
+    return len(f) >= 3 and f[-1] > 0 and f[-1] >= f[-2]
+
+
+def selfreview_of(f):
+    for c in reversed(f.pr["comments"]["nodes"]):
+        if m := last_match(SELF_MARK, c["body"]):
+            return same_change(f, m.group(1))
+    return False
+
+
+def cross_review_of(f):
+    mine = f.posted()
+    for c in reversed(f.pr["comments"]["nodes"]):
+        if c.get("url") not in mine:
+            continue
+        if m := last_match(REVIEW_MARK, c["body"]):
+            return m.group(2) if same_change(f, m.group(1)) else "stale"
+    return None
+
+
+def free_review_attempts(repo_full, n):
+    try:
+        with open(os.path.join(STATE_DIR, "free-reviews", f"{repo_full.replace('/', '__')}__{n}.json")) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def deploy_of(o, r, sha, merged_at, base, pol):
+    """Post-merge state from the configured deploy provider (fleet_deploy)."""
+    import fleet_deploy
+    return fleet_deploy.provider(pol["deploy"], STATE_DIR, pol).status(o, r, sha, merged_at, base)
+
+
+class LiveFacts:
+    """Everything decide() needs from outside: GitHub, the ledger, state files, local tools.
+    Tests and golden fixtures pass a recorded stand-in with the same methods; decide() itself
+    does no other I/O and reads the clock only through its `now`."""
+
+    def __init__(self, o, r, n):
+        self.o, self.r, self.n = o, r, n
+        self.pr = fetch(o, r, n)
+        try:
+            self.pol = load_policy(r, o, self.pr["baseRefName"])
+        except RuntimeError as e:
+            die(f"policy: {e}")
+
+    def files(self):
+        return pr_files(self.o, self.r, self.n, self.pr)
+
+    def prev(self):
+        return last_record(f"{self.o}/{self.r}", self.n) or {}
+
+    def required(self):
+        return required_checks(self.o, self.r, self.pr["baseRefName"])
+
+    def deploy(self, sha):
+        return deploy_of(self.o, self.r, sha, self.pr.get("mergedAt"), self.pr["baseRefName"], self.pol)
+
+    def installed(self, P):
+        return P.installed(self.o, self.r, self.pr, STATE_DIR)
+
+    def requests(self, P):
+        return len(review_requests(f"{self.o}/{self.r}", self.n, P.name))
+
+    def lines_since(self, sha, head):
+        return lines_since(self.o, self.r, sha, head, self.pr["baseRefName"])
+
+    def posted(self):
+        return posted_by_ship(f"{self.o}/{self.r}", self.n)
+
+    def free_tries(self):
+        return free_review_attempts(f"{self.o}/{self.r}", self.n)
+
+    def reviewer_available(self, s):
+        return reviewer_available(self.pr, s)
+
+    def craft(self):
+        return fleet_craft.load(STATE_DIR, f"{self.o}/{self.r}", self.n)
+
+
+def evaluate(o, r, n):
+    return decide(LiveFacts(o, r, n), datetime.now(timezone.utc))
+
+
+def decide(f, now):
+    """The state machine: (facts, now) -> (state record, pr, policy). No I/O of its own."""
+    o, r, n, pr, pol = f.o, f.r, f.n, f.pr, f.pol
+    hfiles = human_files(f.files(), pol["human_paths"])
+    labels = {x["name"] for x in pr["labels"]["nodes"]}
+    s = {"repo": f"{o}/{r}", "number": n, "url": pr["url"], "title": pr["title"], "head": pr["headRefOid"],
+         "branch": pr["headRefName"], "human_paths": hfiles, "labels": sorted(labels),
+         "created_at": pr["createdAt"],
+         "pushed_at": ((pr["commits"]["nodes"] or [{}])[0].get("commit") or {}).get("committedDate"),
+         "checked_at": now.isoformat(timespec="seconds")}
+    prev = f.prev()
+    s["head_seen_at"] = (prev.get("head_seen_at") if prev.get("head") == s["head"] and prev.get("head_seen_at")
+                         else s["checked_at"])
+
+    def out(state, nxt, act=None, **kw):
+        s.update(state=state, next=nxt, act=act, **kw)
+        return s, pr, pol
+
+    if pr["state"] == "CLOSED" and not pr["merged"]:
+        return out("closed", "nothing: PR was closed without merging")
+    if pr["merged"]:
+        sha = (pr["mergeCommit"] or {}).get("oid")
+        if not sha:
+            return out("deployed", "done: merged (no merge commit to watch)")
+        try:
+            st, detail = f.deploy(sha)
+        except RuntimeError as e:
+            die(f"deploy: {e}")
+        nxt = {"deployed": "done: merged and deployed. Tell the user in one line and stop. Never run or offer `dev done`: closing the context is the user's.",
+               "deploying": "wait: `ship --wait`",
+               "deploy-gated": "human: a deploy is waiting for environment approval in GitHub",
+               "deploy-failed": "investigate the failed post-merge run(s), report to the user; do not push to main",
+               "needs-human": "tell the user what's missing or stuck after the merge (detail); do not push to main"}[st]
+        if st == "deployed" and pol.get("after_deploy") and not prev.get("after_deploy"):
+            return out(st, "run after_deploy: `ship --act`", act="after-deploy", detail=detail)
+        return out(st, nxt, detail=detail)
+
+    if pr["mergeable"] == "CONFLICTING" or pr["mergeStateStatus"] == "DIRTY":
+        return out("conflicts", f"rebase onto origin/{pr['baseRefName']}, resolve, run checks, push --force-with-lease, then `ship --act --wait`")
+    cut = truncated(pr)
+    if cut:
+        return out("needs-human", f"PR too large for ship to see whole: GitHub returned more than 100 {' and '.join(cut)}; "
+                                  "it can't tell this PR is clean. Ask the user (split the PR, or review by hand)")
+    required = None if pol["checks"] == "all" else f.required()
+    ci = checks_of(pr, s.get("head_seen_at"), required, now, pol.get("ci_grace_min", CI_GRACE_MIN),
+                   pol.get("required_start_min", REQUIRED_START_MIN))
+    pending, failing, cancelled = ci["pending"], ci["failing"], ci["cancelled"]
+    if ci["optional_failing"]:
+        s["optional_failing"] = ci["optional_failing"]
+    if failing:
+        return out("ci-red", "fix the failing checks, push, then `ship --act --wait`", failing=failing)
+    if ci["never_started"]:
+        return out("needs-human", f"{pr['baseRefName']} requires {', '.join(ci['never_started'])}, which never started on "
+                                  f"this head ({pol.get('required_start_min', REQUIRED_START_MIN)}+ min); GitHub blocks the merge. Tell the user: the "
+                                  "workflow may not run on pull_request, or the requirement is stale",
+                   never_started=ci["never_started"])
+    if cancelled and not pending:
+        return out("ci-cancelled", "re-run the cancelled CI: `ship --act`", act="rerun", cancelled_runs=cancelled)
+
+    # Drafts only, so turning it on doesn't park PRs already under review; but with merge = "auto"
+    # nobody else reviews, so a PR opened ready gets it too before it can merge.
+    if pol.get("craft_review") and (pr["isDraft"] or pol["merge"] == "auto") and (got := craft_state(f, s, out)):
+        return got
+    # Review runs alongside CI: findings to fix, a self-review to write, or a review to
+    # request don't need to wait for green. Only the merge decision does.
+    got = review_state(f, now, pol, s, hfiles, out, ci["all_pending"])
+    if got:
+        return got
+    if pending:
+        return out("ci-running", "wait: `ship --wait`", pending=pending)
+
+    if pr["isDraft"]:
+        return out("draft-clean", "clean; mark ready: `ship --act`", act="ready")
+
+    head = pr["headRefOid"]
+    approvals = [x for x in pr["latestOpinionatedReviews"]["nodes"] if x["state"] == "APPROVED"]
+    stale_approval = any((x["commit"] or {}).get("oid") != head for x in approvals)
+    # GitHub may keep an approval across pushes; ship only trusts one given on this head.
+    approved = pr["reviewDecision"] == "APPROVED" and approvals and not stale_approval
+    if approved or (pol["merge"] == "auto" and not hfiles):
+        # Update from the base only right before merging: earlier updates restart
+        # CI and, on a busy base, never settle.
+        if pr["mergeStateStatus"] == "BEHIND":
+            return out("behind", "update the branch from its base: `ship --act --wait` (then `git pull` locally before more commits)", act="update")
+        if pr["mergeStateStatus"] == "BLOCKED" and not pol["admin"]:
+            return out("needs-human", "clean, but GitHub blocks the merge (branch protection: approvals, required checks or "
+                                      "conversations); tell the user what's missing")
+        if approved or pr["mergeStateStatus"] in ("CLEAN", "HAS_HOOKS", "UNSTABLE") or pol["admin"]:
+            return out("mergeable", "merge: `ship --act`", act="merge")
+    why = "touches human paths: " + ", ".join(hfiles[:5]) if hfiles else f"merge policy is '{pol['merge']}'"
+    if stale_approval:
+        why += "; an approval predates the latest push"
+    if pr["mergeStateStatus"] == "BEHIND":
+        why += "; behind its base: update the branch at merge time, not before"
+    reviewed = ("review passed" if s.get("review") or s.get("cross_review") == "clean"
+                else "no review configured for this repo")
+    if ci["optional_failing"]:
+        why += f"; optional check(s) failing, not required by {pr['baseRefName']}: " + ", ".join(
+            x.split(" (")[0] for x in ci["optional_failing"][:3])
+    return out("awaiting-human", f"clean (CI green, {reviewed}); a human approves/merges ({why})")
+
+
+LARGE_PR_FILES = 40   # past this, reviewers rarely converge: suggest splitting
+SPLIT_PR_FILES = 15
+
+
+def stuck_report(kind, pr, g, threads, s, tier, P, pol=None):
+    """Where a PR is stuck, the likely cause from its review history, and the options, for the
+    human ship hands it to: a spent budget is a report, not a shrug.
+    kind: budget | churn | score | timeout."""
+    f = g["findings_by_round"]
+    hist = [h for h in g.get("history") or [] if h.get("score") is not None]
+    files = pr.get("changedFiles") or 0
+    open_old = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"] and t["isOutdated"]
+                   and any(b in ((t["comments"]["nodes"] or [{}])[0].get("author") or {}).get("login", "")
+                           for b in finding_bots(pol)))
+    where = [f"{g['rounds']} of {tier['max_rereviews']} paid re-reviews used ({s.get('tier')} tier)"]
+    if f:
+        where.append(f"findings per paid review, oldest first: {f}")
+    if hist:
+        where.append(f"{P.title} score by reviewed commit: {' → '.join(str(h['score']) for h in hist)} "
+                     f"(needs {tier['min_score']})")
+    where.append(f"open findings now: P0 {threads['P0']}, P1 {threads['P1']}, P2 {threads['P2']}, other {threads['other']}")
+    if s.get("lines_since_review") is not None:
+        where.append(f"{s['lines_since_review']} lines changed since the last review")
+    where.append(f"PR size: {files} files")
+
+    causes = []
+    if kind == "timeout":
+        causes.append(f"{P.title} didn't answer: an outage, a rate limit, or a PR too big for it")
+    if churning(g):
+        causes.append("each round finds as much as or more than the last: the fixes are creating new findings")
+    elif len(f) >= 2 and f[-1] and f[-1] == f[-2]:
+        causes.append("the same number of findings each round: the fixes may not address what was raised")
+    if open_old:
+        causes.append(f"{open_old} finding(s) still open on lines that have since changed: the change didn't "
+                      "resolve them (re-raised, or never answered)")
+    if len(hist) >= 2 and hist[-1]["score"] == hist[-2]["score"] and (hist[-1]["score"] or 0) < tier["min_score"]:
+        causes.append(f"the score isn't moving ({hist[-1]['score']}/5): {P.title} wants something its threads "
+                      "don't say; read its summary comment")
+    if threads["answered"]:
+        causes.append(f"{len(threads['answered'])} P0/P1 finding(s) answered by reply rather than a fix")
+    pol = pol or {}
+    if files > pol.get("large_pr_files", LARGE_PR_FILES):
+        causes.append(f"the PR is large ({files} files): reviews rarely converge at this size")
+    if not causes:
+        causes.append("no single pattern: read the last review against the diff since")
+
+    options = ["give the agent guidance on the recurring finding(s), or take over that fix yourself"]
+    if files > pol.get("split_pr_files", SPLIT_PR_FILES):
+        options.append("split the PR (the reviewer has less to re-raise each round)")
+    if not markers(pr, RESCUE_MARK):
+        options.append("`ship rescue`: hand it to a fresh agent from the other model family")
+    if kind == "timeout":
+        options.append(f"once {P.title} is back, ask it yourself (ship won't: silence fails closed)")
+    options += ["accept it with the open items written down: approve and merge it yourself", "close it"]
+    return {"kind": kind, "where": where, "causes": causes, "options": options}
+
+
+def craft_state(f, s, out):
+    """The quiet craft review: once per PR, before other reviewers see it. Findings stay off the
+    PR; the agent gives each a verdict. Two failed runs: step aside and say so."""
+    last, failed = fleet_craft.latest(f.craft())
+    if last is None:
+        if failed >= 2:
+            s["craft"] = {"skipped": "the reviewer failed twice"}
+        else:
+            return out("craft-review", "craft review before anyone else reviews: `ship --act --wait` runs it "
+                                       "(free, ~5-15 min; findings stay off the PR)", act="craft-review")
+        return None
+    left = fleet_craft.undecided(last)
+    s["craft"] = {"head": last["head"], "findings": len(last["findings"]), "undecided": len(left)}
+    if left:
+        return out("craft-findings", f"{len(left)} craft finding(s) need a verdict: `ship findings` lists them; "
+                                     "fix what's worth it, then `ship findings <id>... fixed|dismissed \"<why>\"` "
+                                     "(`ship guide craft`), push, then `ship --act --wait`")
+    return None
+
+
+def review_state(f, now, pol, s, hfiles, out, pending):
+    """The review half of the state machine. None = reviews are done for this head."""
+    o, r, pr = f.o, f.r, f.pr
+    try:
+        P = R.provider(pol["review"])
+    except RuntimeError as e:
+        die(f"policy: {e}")
+    if P and not f.installed(P):
+        s["review_installed"] = False
+        P = None
+    review_timeout = pol.get("review_timeout_min", P.timeout_min if P else 0)
+    g = P.state(pr, P.reviewing(pending), now, review_timeout) if P else None
+    if g is not None:
+        # Rounds: ship's own request log is the source of truth (written when it asks); request
+        # comments can be deleted, and the last verdict never lets the count drop.
+        last = f.prev().get("review") or {}
+        g["rounds"] = max(g["rounds"], last.get("rounds") or 0, f.requests(P))
+        # one entry per reviewed commit, for the stuck report's score trend
+        hist = list(last.get("history") or [])
+        if g["reviewed_sha"] and (not hist or hist[-1]["sha"] != g["reviewed_sha"]):
+            hist.append({"sha": g["reviewed_sha"], "score": g["score"], "at": g["verdict_at"]})
+        g["history"] = hist[-20:]
+    s["review"] = g
+    threads = open_bot_threads(pr, finding_bots(pol), P)
+    blocking = threads["P0"] + threads["P1"]
+    minor = threads["P2"] + threads["other"]
+    answered = threads["answered"]
+    prc = "work them per `ship guide findings` (replying to threads: `ship guide replies`)"
+    if g is not None:
+        tier_name = pol["tier"] or ("critical" if hfiles or g["critical_impact"] else "normal")
+        tier = pol["tiers"][tier_name]
+        rereviews_left = tier["max_rereviews"] - g["rounds"]
+        s.update(tier=tier_name, rereviews_left=rereviews_left)
+
+        def stuck(state, msg, kind, **kw):
+            """Hand back with a stuck report: where it is, the likely cause, what to do next."""
+            return out(state, msg, stuck=stuck_report(kind, pr, g, threads, s, tier, P, pol), **kw)
+        good_score = (g["score"] or 0) >= tier["min_score"]
+
+        if g["retag_pending"]:
+            return out("review-pending", f"wait: `ship --wait` ({P.title} is reviewing)")
+        if g["retag_unanswered"]:
+            # Fail closed: silence is not a pass (outage, rate limit, not installed, PR too big),
+            # and re-tagging into silence just pays again.
+            return stuck("needs-human", f"{P.title} didn't answer the last review request within {review_timeout} min. "
+                                      f"Tell the user; don't re-tag. If this repo has no {P.title}, set review = \"none\" "
+                                      "for it in the fleet config ([repos.<name>])", "timeout")
+        if not g["present"]:
+            ready = [x["createdAt"] for x in (pr.get("timelineItems") or {}).get("nodes", []) if x]
+            if age_minutes((ready or [pr["createdAt"]])[-1], now) < pol.get("review_first_grace_min",
+                                                                          P.first_review_grace_min):
+                return out("review-pending", f"wait: `ship --wait` ({P.title} reviews new PRs on its own)")
+            return out("review-stale", f"request {P.title}'s first review: `ship --act`", act="retag")
+        # A reply to a P0/P1 is a claim, not a fix: only a bot review after the reply clears it.
+        unverified = [a for a in answered if not g["verdict_at"] or a > g["verdict_at"]]
+        if unverified and not blocking:
+            if rereviews_left <= 0:
+                return stuck("needs-human", f"{len(unverified)} P0/P1 finding(s) were answered but not re-reviewed, and the "
+                                            f"re-review budget is spent ({tier_name}); show the user the replies and ask", "budget")
+            if pol["require_selfreview"] and not selfreview_of(f):
+                return out("self-review", f"{len(unverified)} answered P0/P1 finding(s) need a re-review to confirm: do the "
+                                          "self-review (`ship guide self-review`), post it, then `ship --act --wait`")
+            return out("review-stale", f"{len(unverified)} P0/P1 finding(s) answered since {P.title}'s last review: a "
+                                       f"re-review must confirm them; {rereviews_left} left: `ship --act --wait`", act="retag")
+        if blocking or minor:
+            kind = "P0/P1" if blocking else "minor"
+            after = ("then a re-review will be needed" if blocking or not good_score
+                     else "no re-review needed: fix, reply, push, re-run ship")
+            return out("review-findings", f"{blocking + minor} open {kind} finding(s), {P.title} {g['score']}/5: {prc}; {after}",
+                       threads=threads)
+        if not g["reviewed_head"]:
+            delta = f.lines_since(g["reviewed_sha"], pr["headRefOid"])
+            s["lines_since_review"] = delta
+            small = delta is not None and delta <= tier["fixup_max_lines"]
+            if not (good_score and small):
+                why = (f"score {g['score']}/5 < {tier['min_score']} ({tier_name})" if not good_score
+                       else f"{delta if delta is not None else 'unknown'} lines changed since review > "
+                            f"{tier['fixup_max_lines']} allowed without re-review ({tier_name})")
+                if rereviews_left <= 0:
+                    return stuck("needs-human", f"re-review budget spent ({g['rounds']} paid re-reviews, {tier_name}); {why}. "
+                                                "Summarise what changed since the last review and ask the user.", "budget")
+                rescues = markers(pr, RESCUE_MARK)
+                if churning(g):
+                    if rescues:
+                        return stuck("needs-human", f"still churning after a fresh-context rescue (findings per paid review: "
+                                                    f"{g['findings_by_round']}); stop and ask the user", "churn")
+                    return stuck("churn", f"not converging (findings per paid review: {g['findings_by_round']}): stop patching. "
+                                        "Hand off to a fresh agent from the other model family: `ship rescue`, then stop working "
+                                        "on this PR yourself", "churn", act=None)
+                need_free = (tier["free_review_first"] or pol["cross_review"] or g["rounds"] >= 1)
+                cr = cross_review_of(f) if need_free else None
+                if need_free and cr != "clean":
+                    if cr == "findings":
+                        return out("review-findings", "the cross-family review found P0/P1 issues on this head (see its PR comment): "
+                                                      "work them per `ship guide findings`, push, then `ship --act --wait`")
+                    if pol["require_selfreview"] and not selfreview_of(f):
+                        return out("self-review", f"before the next review ({why}): do the self-review "
+                                                  "(`ship guide self-review`) and post it as a PR comment, then `ship --act --wait`")
+                    tries = f.free_tries()
+                    if len(tries) >= pol["max_free_reviews"]:
+                        return stuck("needs-human", f"{len(tries)} free reviews and {g['rounds']} paid re-reviews without "
+                                                    "converging; ask the user", "budget")
+                    if not f.reviewer_available(s):
+                        need_free = False  # no safe reviewer here: fall through to the paid review
+                    else:
+                        return out("cross-review", f"fresh-context review from the other model family before paying {P.title} "
+                                                   f"({why}): `ship --act --wait` runs it (free, ~5-15 min)", act="free-review")
+                if pol["require_selfreview"] and not selfreview_of(f):
+                    return out("self-review", f"before paying for a re-review ({why}): do the self-review "
+                                              "(`ship guide self-review`) and post it as a PR comment, then `ship --act --wait`")
+                return out("review-stale", f"re-review needed ({why}); {rereviews_left} left: `ship --act --wait`", act="retag")
+        elif not good_score:
+            if rereviews_left <= 0:
+                return stuck("needs-human", f"{P.title} {g['score']}/5 < {tier['min_score']} with no findings left and "
+                                            f"no re-review budget ({tier_name}); ask the user", "score")
+            return out("review-findings", f"{P.title} {g['score']}/5 < {tier['min_score']} ({tier_name}) but no open threads: "
+                                          f"read its summary for what it wants, fix the cause, push, then `ship --act --wait`")
+    elif blocking or minor:
+        return out("review-findings", f"{blocking + minor} open bot review finding(s): {prc}", threads=threads)
+    elif answered:
+        # no review bot to re-review: a replied-to P0/P1 from another bot stays with a human
+        return out("needs-human", f"{len(answered)} P0/P1 bot finding(s) were answered but not resolved, and this repo has "
+                                  "no review bot configured to re-review them; show the user the replies and ask")
+
+    if pol["cross_review"] and g is None:
+        cr = cross_review_of(f)
+        s["cross_review"] = cr
+        if cr in (None, "stale"):
+            if not f.reviewer_available(s):
+                return out("needs-human", "policy requires a cross-family review but no sandboxed reviewer is available "
+                                          "(install bubblewrap for Codex); ask the user")
+            return out("cross-review", "fresh-context review from the other model family: `ship --act --wait`", act="free-review")
+        if cr == "findings":
+            return out("review-findings", "address the cross-family review comment's P0/P1 findings, push, then `ship --act --wait`")
+    return None
+
+
+# ── actions ──────────────────────────────────────────────────────────────────
+
+def author_kind():
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        try:
+            d = json.loads(run("herdr", "agent", "list", check=False) or "{}")
+            for a in d.get("result", {}).get("agents", []):
+                if a.get("pane_id") == pane and a.get("agent") in ("claude", "codex"):
+                    return a["agent"]
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
+    if os.environ.get("CLAUDECODE"):
+        return "claude"
+    if any(k.startswith("CODEX_") for k in os.environ):
+        return "codex"
+    return None
+
+
+def ensure_label(o, r, n, labels):
+    kind = author_kind()
+    if not kind or any(l.startswith("agent:") for l in labels):
+        return
+    lab = f"agent:{kind}"
+    run("gh", "label", "create", lab, "-R", f"{o}/{r}", "--color", "5319e7", "--force", check=False)
+    run("gh", "pr", "edit", str(n), "-R", f"{o}/{r}", "--add-label", lab, check=False)
+
+
+def act(s, pr, pol):
+    o, r = s["repo"].split("/")
+    n = str(s["number"])
+    ensure_label(o, r, s["number"], s["labels"])
+    if s["act"] == "retag":
+        # Two ship processes on one PR (agent + rescue, or two loops) must not both pay.
+        lock = os.path.join(STATE_DIR, "retag", f"{s['repo'].replace('/', '__')}__{n}__{s['head']}")
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            return "re-review already requested for this head"
+        P = R.provider(pol["review"])
+        p = proc.run(["gh", "pr", "comment", n, "-R", s["repo"], "--body", P.request_text])
+        if p.returncode != 0:
+            os.remove(lock)  # nothing was requested: the next run must be able to try again
+            return f"re-review request failed: {p.stderr.strip()[:200]}"
+        remember_request(s["repo"], s["number"], P.name, s["head"], p.stdout.strip())
+        return f"re-requested {P.title}"
+    if s["act"] == "free-review":
+        return free_review(s["repo"], s["number"])
+    if s["act"] == "craft-review":
+        return craft_review(s["repo"], s["number"])
+    if s["act"] == "rerun":
+        for rid in s.get("cancelled_runs", []):
+            run("gh", "run", "rerun", str(rid), "-R", s["repo"], check=False)
+        return f"re-ran {len(s.get('cancelled_runs', []))} cancelled workflow run(s)"
+    if s["act"] == "update":
+        p = proc.run(["gh", "pr", "update-branch", n, "-R", s["repo"]])
+        return "merged base into the branch on GitHub" if p.returncode == 0 else f"update refused: {p.stderr.strip()[:200]}"
+    if s["act"] == "ready":
+        run("gh", "pr", "ready", n, "-R", s["repo"])
+        return "marked ready for review"
+    if s["act"] == "after-deploy":
+        # once per PR, taken before it runs: two ship processes on one PR must not both run it
+        lock = os.path.join(STATE_DIR, "after-deploy", f"{s['repo'].replace('/', '__')}__{n}")
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            return "after_deploy already ran for this PR"
+        p = proc.run(["sh", "-c", pol["after_deploy"]], timeout=AFTER_DEPLOY_TIMEOUT_S, cwd=os.path.expanduser("~"))
+        tail = None
+        if p.returncode:
+            tail = (p.stderr or p.stdout).strip()[-AFTER_DEPLOY_TAIL:]
+        s["after_deploy"] = {"ok": p.returncode == 0, "at": s["checked_at"], "tail": tail}
+        return "ran after_deploy" if p.returncode == 0 else f"after_deploy failed (exit {p.returncode})"
+    if s["act"] == "merge":
+        args = ["gh", "pr", "merge", n, "-R", s["repo"], f"--{pol['method']}", "--match-head-commit", s["head"]]
+        if pr["reviewDecision"] != "APPROVED" and pol["admin"]:
+            args.append("--admin")
+        p = proc.run(args)
+        if p.returncode != 0:
+            return f"merge refused: {p.stderr.strip()[:300]}"
+        return "merged"
+    return None
+
+
+def ledger_path(repo_full, n):
+    return os.path.join(STATE_DIR, "ledger", f"{repo_full.replace('/', '__')}__{n}.json")
+
+
+def last_record(repo_full, n):
+    try:
+        with open(ledger_path(repo_full, n)) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def on_branch(branch):
+    """True when the current directory is a checkout of this PR's branch."""
+    p = proc.run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    return p.returncode == 0 and p.stdout.strip() == branch
+
+
+def worktree_root():
+    p = proc.run(["git", "rev-parse", "--show-toplevel"])
+    return p.stdout.strip() if p.returncode == 0 else os.getcwd()
+
+
+def has_note(path):
+    try:
+        with open(os.path.join(STATE_DIR, "notes.json")) as f:
+            return bool(json.load(f).get(path, {}).get("text"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+
+RUN_URL = re.compile(r"/actions/runs/(\d+)")
+LOG_LINES = 60
+LOG_CHARS = 2000  # the remote API's room for a log tail (fleet_remote.LONG_FIELDS)
+FAILED = ("ci-red", "deploy-failed")
+
+
+def failure_log(repo_full, s, prev):
+    """The failed run's last log lines (redacted), fetched once per run: the 'why' behind
+    ci-red and deploy-failed, for whoever reads the ledger (cockpit, the remote API)."""
+    m = RUN_URL.search(s.get("detail") or " ".join(s.get("failing") or []))
+    if not m:
+        return None
+    run_id = m.group(1)
+    if (prev.get("failure_log") or {}).get("run") == run_id:
+        return prev["failure_log"]
+    p = proc.run(["gh", "run", "view", run_id, "-R", repo_full, "--log-failed"], timeout=60)
+    if p.returncode or not p.stdout.strip():
+        return {"run": run_id, "tail": None}
+    from fleet_redact import redact
+    # gh prefixes each line with "job<TAB>step<TAB>timestamp " and keeps ANSI colour codes
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", re.sub(r"\x1b\[[0-9;]*m", "", line.split("\t")[-1]))
+             for line in p.stdout.splitlines()]
+    return {"run": run_id, "tail": redact("\n".join(lines[-LOG_LINES:]))[-LOG_CHARS:]}
+
+
+def persist(s):
+    """Record a state, with the failed run's log when it's ci-red or deploy-failed."""
+    if s["state"] in FAILED:
+        prev = last_record(s["repo"], s["number"]) or {}
+        s = dict(s, failure_log=failure_log(s["repo"], s, prev))
+    record(s)
+
+
+def record(s):
+    prev = last_record(s["repo"], s["number"]) or {}
+    # The cockpit re-runs ship from elsewhere: only a run inside the PR's checkout says where it lives.
+    here = on_branch(s["branch"])
+    s = dict(s, pane=(os.environ.get("HERDR_PANE_ID") if here else None) or prev.get("pane"),
+             cwd=worktree_root() if here else prev.get("cwd"),
+             author=author_kind() or prev.get("author"),
+             after_deploy=s.get("after_deploy") or prev.get("after_deploy"))
+    if s["state"] != prev.get("state"):
+        import fleet_events
+        fleet_events.append(STATE_DIR, "pr", where=f"{s['repo'].split('/')[1]}#{s['number']}", url=s["url"],
+                            title=s["title"], was=prev.get("state"), now=s["state"],
+                            reason=s.get("detail") or ", ".join(s.get("failing") or []) or None)
+    write_json(ledger_path(s["repo"], s["number"]), s)
+
+
+def show(s, as_json):
+    if as_json:
+        print(json.dumps(s, indent=1))
+        return
+    tier = f"  [{s['tier']}, {s['rereviews_left']} re-reviews left]" if s.get("tier") else ""
+    print(f"{s['repo']}#{s['number']}  {s['state']}{tier}  {s['title']}")
+    for k in ("failing", "pending", "detail"):
+        if s.get(k):
+            v = s[k] if isinstance(s[k], str) else "\n    ".join(s[k])
+            print(f"  {k}: {v}")
+    if s.get("review"):
+        g = s["review"]
+        print(f"  {g['provider']}: {g['score']}/5, reviewed head={g['reviewed_head']}, rounds={g['rounds']}")
+    if c := s.get("craft"):
+        print(f"  craft review: skipped, {c['skipped']}" if c.get("skipped") else
+              f"  craft review of {c['head'][:8]}: {c['findings']} finding(s), {c['undecided']} without a verdict")
+    if (ad := s.get("after_deploy")) and not ad["ok"]:
+        print(f"  after_deploy failed: {ad['tail']}")
+    if s.get("human_paths"):
+        print(f"  human paths: {', '.join(s['human_paths'][:5])}")
+    if s.get("stuck"):
+        st = s["stuck"]
+        print("  stuck report:")
+        for title, key in (("where", "where"), ("likely cause", "causes"), ("options", "options")):
+            print(f"    {title}:")
+            for line in st[key]:
+                print(f"      - {line}")
+    if s.get("acted"):
+        print(f"  did: {s['acted']}")
+    print(f"next: {s['next']}")
+    if s["state"] not in ("deployed", "closed") and on_branch(s.get("branch")) and not has_note(worktree_root()):
+        print('also: describe this workstream for the cockpit, one sentence, what and why: `fleet note "..."`')
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+def cmd_status(argv):
+    ap = argparse.ArgumentParser(prog="ship", add_help=False)
+    ap.add_argument("pr", nargs="?")
+    ap.add_argument("--act", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--wait", nargs="?", type=int, const=1800)
+    # `--wait` takes an optional number of seconds; don't let it swallow a PR URL after it
+    argv = [("--wait=1800" if x == "--wait" and not (i + 1 < len(argv) and argv[i + 1].isdigit()) else x)
+            for i, x in enumerate(argv)]
+    a = ap.parse_args(argv)
+    do_act, as_json, wait = a.act, a.json, a.wait
+    ref = resolve_pr(a.pr)
+    if not ref:
+        print("no-pr  (no PR for this branch)")
+        print(f"next: {commit_hint()}, then `ship --act --wait`")
+        return
+    deadline = time.time() + (wait or 0)
+    acted = []
+    last_seen = None
+    while True:
+        s, pr, pol = evaluate(*ref)
+        if do_act:
+            done = act(s, pr, pol)
+            if done and done not in acted and "refused" not in done:
+                acted.append(done)
+                persist(s)
+                time.sleep(10)  # let GitHub register the action before re-reading
+                continue
+            elif done and done not in acted:
+                acted.append(done)
+        s["acted"] = "; ".join(acted) or None
+        persist(s)
+        if wait and s["state"] in WAITING and time.time() < deadline:
+            seen = (s["state"], s["acted"])
+            if seen != last_seen and not as_json:  # progress, so a waiting agent isn't blind
+                did = f" (did: {s['acted']})" if s["acted"] else ""
+                print(f"… {s['state']}{did}: {s['next']}", flush=True)
+                last_seen = seen
+            time.sleep(max(1, min(30, deadline - time.time())))
+            continue
+        show(s, as_json)
+        return
+
+
+def pr_author(s):
+    return next((l.split(":", 1)[1] for l in s["labels"] if l.startswith("agent:")), None) or author_kind()
+
+
+def repo_path(r):
+    repos = json.loads(run("dev", "repos", "--json"))["repos"]
+    hit = next((x for x in repos if x["alias"] == r or os.path.basename(x["path"]) == r), None)
+    return hit["path"] if hit else die(f"repo '{r}' is not in the dev registry")
+
+
+def codex_sandbox_works():
+    """Cached for an hour: the probe takes seconds and evaluate() asks often."""
+    cache = os.path.join(STATE_DIR, "codex-sandbox.json")
+    try:
+        with open(cache) as f:
+            c = json.load(f)
+        if time.time() - c["at"] < 3600:
+            return c["ok"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    try:
+        p = subprocess.run(["codex", "sandbox", "--", "true"], capture_output=True, text=True, timeout=60)
+        ok = p.returncode == 0 and "bwrap:" not in p.stdout + p.stderr
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        ok = False
+    write_json(cache, {"at": time.time(), "ok": ok})
+    return ok
+
+
+def reviewer_for(s):
+    author = pr_author(s)
+    if not author:
+        return None, None
+    return author, run("fleet", "role", "reviewer", "--author", author).split()
+
+
+def craft_reviewer(s):
+    """The other family when it can run sandboxed, else claude with read-only tools: for craft,
+    a context that didn't write the code matters more than a different model."""
+    author, role = reviewer_for(s)
+    if role and (role[0] != "codex" or codex_sandbox_works()):
+        return author, role
+    return author or "unknown", ["claude", "-", "-"]
+
+
+def reviewer_available(pr, s):
+    """A free review needs a known author and a reviewer that can't touch anything."""
+    author, role = reviewer_for(s)
+    if not role:
+        return False
+    return role[0] != "codex" or codex_sandbox_works()
+
+
+REVIEWER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR",
+                "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")
+
+
+def reviewer_env():
+    """Allowlisted environment: no cloud keys, no GitHub or SSH credentials. The reviewer
+    reads files on disk; it has no reason to reach GitHub or anything else."""
+    env = {k: os.environ[k] for k in REVIEWER_ENV if k in os.environ}
+    empty = os.path.join(STATE_DIR, "no-creds")
+    os.makedirs(empty, exist_ok=True)
+    env.update(GH_CONFIG_DIR=empty, GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="false",
+               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
+def headless(kind, model, effort, prompt, cwd, io_dir):
+    """One-shot, read-only agent run in cwd (the PR checkout). Returns its final message.
+    Its output file lives in io_dir, never in cwd: the checkout is attacker-controlled and a
+    committed symlink there would redirect the write (or the read-back) anywhere."""
+    out_file = os.path.join(io_dir, "review-out")
+    if kind == "codex":
+        # Ubuntu 24.04 blocks unprivileged user namespaces unless the system bubblewrap is
+        # installed (`sudo apt install bubblewrap`). No sandbox, no review: an unsandboxed
+        # reviewer could edit the fleet config or ship itself.
+        if not codex_sandbox_works():
+            return ""
+        args = ["codex", "exec", "-s", "read-only", "--ephemeral", "-C", cwd, "-o", out_file]
+        if model != "-":
+            args += ["-m", model]
+        if effort != "-":
+            args += ["-c", f'model_reasoning_effort="{effort}"']
+        subprocess.run(args + [prompt], capture_output=True, text=True, timeout=3600, env=reviewer_env())
+        try:
+            with open(out_file) as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+    # The PR is on disk (diff + description in io_dir): no gh, no network, and no shell at all.
+    # `git diff/show/log --output=<path>` would let a "read-only" reviewer write files.
+    args = ["claude", "-p", "--permission-mode", "default", "--allowedTools", "Read", "Grep", "Glob"]
+    if model != "-":
+        args += ["--model", model]
+    if effort != "-":
+        args += ["--effort", effort]
+    # the prompt goes on stdin: --allowedTools takes every argument after it, prompt included
+    return subprocess.run(args, input=prompt, capture_output=True, text=True, timeout=3600, cwd=cwd,
+                          env=reviewer_env()).stdout
+
+
+class NoReviewer(Exception):
+    pass
+
+
+def review_headless(repo_full, n, brief, any_family=False):
+    """Run `brief` (a skills/ship file) through a fresh, read-only reviewer from the other model
+    family at the PR head. Returns (text, pr, kind, model, author). Raises NoReviewer.
+    any_family: when the other family can't run sandboxed here, a fresh claude will do."""
+    o, r = repo_full.split("/")
+    s, pr, _ = evaluate(o, r, n)
+    author, role = craft_reviewer(s) if any_family else reviewer_for(s)
+    if not role:
+        raise NoReviewer("unknown author harness; add label agent:claude|codex")
+    kind, model, effort = role
+    head = pr["headRefOid"]
+    base = repo_path(r)
+    wt = os.path.join(STATE_DIR, "review-wt", f"{r}-{n}-{head[:8]}")
+    os.makedirs(os.path.dirname(wt), exist_ok=True)
+    run("git", "-C", base, "fetch", "-q", "origin", f"pull/{n}/head", pr["baseRefName"])
+    if not os.path.isdir(wt):
+        run("git", *NO_HOOKS, "-C", base, "worktree", "add", "-q", "--detach", wt, head)
+    # The reviewer may run sandboxed without network: hand it the PR as files. Never inside the
+    # checkout (the PR controls it: a committed `.fleet-pr.md -> ~/.bashrc` symlink would turn
+    # this write into code execution). A fresh 0700 dir of our own, new files only (O_EXCL).
+    io_root = os.path.join(STATE_DIR, "review-io")
+    os.makedirs(io_root, mode=0o700, exist_ok=True)
+    io_dir = tempfile.mkdtemp(prefix=f"{r}-{n}-", dir=io_root)
+    pr_md, pr_diff = os.path.join(io_dir, "pr.md"), os.path.join(io_dir, "pr.diff")
+    with open(pr_diff, "x") as f:
+        f.write(run("gh", "pr", "diff", str(n), "-R", repo_full))
+    with open(pr_md, "x") as f:
+        f.write(f"# {pr['title']}\n\n{run('gh', 'pr', 'view', str(n), '-R', repo_full, '--json', 'body', '-q', '.body')}")
+    with open(skill_file(brief)) as f:
+        prompt = (f.read().replace("{{PR_URL}}", pr["url"]).replace("{{HEAD}}", head).replace("{{AUTHOR}}", author)
+                  .replace("{{PR_MD}}", pr_md).replace("{{PR_DIFF}}", pr_diff)
+                  .replace("{{MAX_FINDINGS}}", str(fleet_craft.MAX_FINDINGS)))
+    try:
+        return headless(kind, model, effort, prompt, wt, io_dir).strip(), pr, kind, model, author
+    finally:
+        run("git", "-C", base, "worktree", "remove", "--force", wt, check=False)
+        shutil.rmtree(io_dir, ignore_errors=True)
+
+
+def free_review(repo_full, n, post=True):
+    """Fresh-context PR review by the other model family, run headless on our subscriptions.
+    ship (not the reviewer) posts the verdict marker and records the comment it posted, so
+    neither a reviewer nor an agent can fake a pass."""
+    try:
+        text, pr, kind, model, author = review_headless(repo_full, n, "review-brief.md")
+    except NoReviewer as e:
+        return f"free review refused: {e}"
+    head = pr["headRefOid"]
+    # The verdict is the reviewer's LAST verdict line; anything earlier may be quoted text.
+    verdicts = re.findall(r"^VERDICT:\s*(clean|findings)\s*$", text, re.M | re.I)
+    if post:
+        tries_path = os.path.join(STATE_DIR, "free-reviews", f"{repo_full.replace('/', '__')}__{n}.json")
+        write_json(tries_path, free_review_attempts(repo_full, n) + [
+            {"head": head, "kind": kind, "verdict": verdicts[-1].lower() if verdicts else None,
+             "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}])
+    if not verdicts:
+        write_json(os.path.join(STATE_DIR, "last-review.json"), {"pr": pr["url"], "kind": kind, "output": text})
+        return f"free review refused: {kind} gave no verdict; output in {STATE_DIR}/last-review.json"
+    verdict = verdicts[-1].lower()
+    body = re.sub(r"^VERDICT:.*$", "", text, flags=re.M | re.I)
+    body = re.sub(r"<!--.*?(-->|$)", "", body, flags=re.S).strip()  # no markers from the reviewer
+    # The diff can prompt-inject the reviewer into quoting a local file: nothing secret-looking
+    # reaches a PR comment.
+    from fleet_redact import redact
+    body = redact(body)
+    comment = (f"**Cross-family review** ({kind}{'/' + model if model != '-' else ''}, fresh context, author was {author})\n\n"
+               f"{body}\n\n<!-- fleet-review sha={head} verdict={verdict} -->")
+    if not post:
+        print(comment)
+        return f"free {kind} review (dry run, not posted): {verdict}"
+    url = run("gh", "pr", "comment", str(n), "-R", repo_full, "--body", comment).strip().splitlines()[-1]
+    remember_posted(repo_full, n, url)
+    return f"free {kind} review posted: {verdict}"
+
+
+def craft_review(repo_full, n):
+    """Run the craft brief and keep its findings in the local store (fleet_craft)."""
+    import fcntl
+    lock = os.path.join(STATE_DIR, "craft", f"{repo_full.replace('/', '__')}__{n}.lock")
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    with open(lock, "w") as lf:  # an flock dies with its process: a killed run can't wedge the PR
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "craft review already running for this PR"
+        try:
+            text, pr, kind, _, _ = review_headless(repo_full, n, "craft-brief.md", any_family=True)
+        except NoReviewer as e:
+            return f"craft review refused: {e}"
+    findings = fleet_craft.parse(text)
+    if findings is None:
+        fleet_craft.add(STATE_DIR, repo_full, n, pr["headRefOid"], kind, [], failed="no END line")
+        write_json(os.path.join(STATE_DIR, "last-review.json"), {"pr": pr["url"], "kind": kind, "output": text})
+        return f"craft review failed: {kind} never finished; output in {STATE_DIR}/last-review.json"
+    fleet_craft.add(STATE_DIR, repo_full, n, pr["headRefOid"], kind, findings)
+    return f"craft review by {kind}: {len(findings)} finding(s)" + ("; `ship findings` lists them" if findings else "")
+
+
+def cmd_findings(argv):
+    """List the latest craft review's findings, or record a verdict on some of them."""
+    verdict = next((a for a in argv if a in fleet_craft.VERDICTS), None)
+    head = argv[:argv.index(verdict)] if verdict else [a for a in argv if a != "--json"]
+    ids = [a for a in head if re.fullmatch(r"c\d+", a)]
+    rest = [a for a in head if a not in ids]
+    ref = resolve_pr(rest[0] if rest else None) or die("no PR: pass its URL or number")
+    repo_full, n = f"{ref[0]}/{ref[1]}", ref[2]
+    if verdict:
+        why = " ".join(argv[argv.index(verdict) + 1:]).strip()
+        if not ids or not why:
+            die('usage: ship findings [<pr>] <id>... fixed|dismissed "<why: what you changed, or why it isn\'t worth it>"')
+        local = run("git", "rev-parse", "HEAD", check=False).strip() or None
+        unknown = fleet_craft.decide(STATE_DIR, repo_full, n, ids, verdict, why, local)
+        if unknown:
+            die(f"no such finding in the latest craft review: {', '.join(unknown)} (`ship findings` lists them)")
+        print(f"{verdict}: {', '.join(ids)}")
+        return
+    last, failed = fleet_craft.latest(fleet_craft.load(STATE_DIR, repo_full, n))
+    if "--json" in argv:
+        print(json.dumps(last, indent=1))
+        return
+    if not last:
+        print("no craft review yet" + (f" ({failed} failed run(s))" if failed else "") + ": `ship --act --wait` runs it")
+        return
+    print(f"craft review of {last['head'][:8]} by {last['kind']}, {last['at']}: {len(last['findings'])} finding(s)")
+    for x in last["findings"]:
+        where = f"{x['file']}:{x['line']}" if x.get("line") else x["file"]
+        mark = f"[{x['verdict']}: {x['why']}]" if x.get("verdict") else "[open]"
+        print(f"\n{x['id']}  {x['lens']}/{x['severity']}  {where}  {mark}\n    {x['summary']}")
+        if x.get("detail"):
+            print("    " + x["detail"].replace("\n", "\n    "))
+        if x.get("generalises"):
+            print(f"    rule? {x['generalises']}")
+
+
+def cmd_review(argv):
+    pos = [a for a in argv if not a.startswith("--")]
+    ref = resolve_pr(pos[0] if pos else None)
+    if not ref:
+        die("no PR")
+    print(free_review(f"{ref[0]}/{ref[1]}", ref[2], post="--dry-run" not in argv))
+
+
+def cmd_rescue(argv):
+    """Hand a non-converging PR to a fresh interactive agent from the other family."""
+    ref = resolve_pr(argv[0] if argv else None)
+    if not ref:
+        die("no PR")
+    o, r, n = ref
+    s, pr, _ = evaluate(o, r, n)
+    author = pr_author(s)
+    kind = run("fleet", "role", "reviewer", "--author", author).split()[0] if author else run("fleet", "role", "advisor").split()[0]
+    os.makedirs(STATE_DIR, exist_ok=True)
+    brief = os.path.join(STATE_DIR, f"rescue-{r}-{n}.md")
+    with open(skill_file("rescue-brief.md")) as f:
+        text = f.read()
+    with open(brief, "w") as f:
+        f.write(text.replace("{{PR_URL}}", pr["url"]).replace("{{BRANCH}}", pr["headRefName"])
+                .replace("{{BASE}}", pr["baseRefName"]).replace("{{AUTHOR}}", author or "unknown")
+                .replace("{{HISTORY}}", json.dumps((s.get("review") or {}).get("findings_by_round", []))))
+    run("gh", "pr", "comment", str(n), "-R", f"{o}/{r}", "--body",
+        f"Handing this PR to a fresh {kind} agent: review rounds stopped converging.\n\n"
+        f"<!-- fleet-rescue sha={pr['headRefOid']} -->")
+    name = f"rescue-{r[:10]}-{n}".lower()
+    args = ["orch", "start", name, "--repo", r, "--brief", brief, "--kind", kind]
+    print(" ".join(args))
+    os.execvp("orch", args)
+
+
+def default_owner():
+    """Owner for a bare `repo#n`: the first [github] orgs entry in config.toml, else the
+    owner of the repo we're standing in."""
+    import fleet_config
+    if orgs := fleet_config.orgs():
+        return orgs[0]
+    out = run("gh", "repo", "view", "--json", "owner", "--jq", ".owner.login", check=False).strip()
+    return out or die("repo#n needs an owner: write owner/repo#n, or set [github] orgs in ~/.config/fleet/config.toml")
+
+
+def search_scope():
+    """GitHub search qualifiers for text refs: your orgs (OR'd), else PRs that involve you."""
+    import fleet_config
+    return " ".join(f"org:{o}" for o in fleet_config.orgs()) or "involves:@me"
+
+
+PR_FACTS = """number url title state isDraft merged mergedAt closedAt createdAt headRefName headRefOid baseRefName
+ mergedBy{login} mergeCommit{oid} author{login} mergeable mergeStateStatus reviewDecision
+ commits(last:1){nodes{commit{statusCheckRollup{state}}}}"""
+
+
+def ago(iso):
+    m = age_minutes(iso)
+    return f"{m:.0f}m ago" if m < 90 else f"{m / 60:.1f}h ago" if m < 48 * 60 else f"{m / 1440:.0f}d ago"
+
+
+def pr_ref(arg):
+    """URL, owner/repo#n, repo#n, or a bare number (current repo) → (owner, repo, n); else None.
+    Owner and repo must look like GitHub names: they end up in a GraphQL request."""
+    if m := re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)(?:[/?#].*)?", arg):
+        return m.group(1), m.group(2), int(m.group(3))
+    if m := re.fullmatch(r"(?:([\w.-]+)/)?([\w.-]+)#(\d+)", arg):
+        return m.group(1) or default_owner(), m.group(2), int(m.group(3))
+    if re.fullmatch(r"#?\d+", arg):
+        return resolve_pr(arg.lstrip("#"))
+    return None
+
+
+DEPLOY_LOOKBACK_H = 72  # older merges: don't bother asking about deploy runs
+
+
+def live_deploy(p):
+    """Read from GitHub now, never from the ledger: a ledger entry is only as fresh as the
+    last `ship` run on that PR, and nothing re-runs ship on a merged PR."""
+    if not (p and p["merged"] and p.get("mergeCommit")):
+        return None
+    o, r = p["url"].split("/")[3:5]
+    try:
+        pol = load_policy(r, o, p.get("baseRefName"))
+        if age_minutes(p["mergedAt"]) > pol.get("deploy_lookback_hours", DEPLOY_LOOKBACK_H) * 60:
+            return None
+        return deploy_of(o, r, p["mergeCommit"]["oid"], p["mergedAt"], p.get("baseRefName"), pol)
+    except (SystemExit, RuntimeError):
+        return None
+
+
+def fact_line(p, deploy=None):
+    repo = p["url"].split("/")[4]
+    head = f"{repo}#{p['number']}"
+    if p["merged"]:
+        by = (p.get("mergedBy") or {}).get("login", "?")
+        line = f"{head}  MERGED {ago(p['mergedAt'])} by {by}"
+        if deploy:
+            line += f"  deploy: {deploy[0]} ({deploy[1]})"
+    elif p["state"] == "CLOSED":
+        line = f"{head}  CLOSED without merge {ago(p['closedAt'])}"
+    else:
+        ci = ((p["commits"]["nodes"] or [{}])[0].get("commit", {}).get("statusCheckRollup") or {}).get("state") or "none"
+        bits = ["OPEN" + (" (draft)" if p["isDraft"] else ""), f"CI {ci.lower()}",
+                f"merge {p['mergeStateStatus'].lower()}", f"review {(p['reviewDecision'] or 'none').lower()}",
+                f"head {p['headRefOid'][:7]}"]
+        line = f"{head}  " + "  ".join(bits)
+    return f"{line}\n    {p['title']}  [{p['headRefName']}]  {p['url']}"
+
+
+def cmd_pr(argv):
+    """Facts only, one GraphQL call for all refs. Text that isn't a ref searches open and
+    recent PRs (your orgs, else ones involving you) by title/branch."""
+    if not argv:
+        argv = [""]
+    refs, texts = [], []
+    for a in argv:
+        (refs.append(pr_ref(a)) if a and pr_ref(a) else texts.append(a)) if a else refs.append(resolve_pr(None))
+    refs = [x for x in refs if x]
+    # Every value travels as a GraphQL variable, never inside the query text: a crafted ref or
+    # search string must not be able to add fields (or mutations) to the request.
+    decls, parts, fields = [], [], []
+    for i, (o, r, n) in enumerate(refs):
+        decls += [f"$o{i}:String!", f"$r{i}:String!", f"$n{i}:Int!"]
+        parts.append(f"p{i}:repository(owner:$o{i},name:$r{i}){{pullRequest(number:$n{i}){{{PR_FACTS}}}}}")
+        fields += ["-f", f"o{i}={o}", "-f", f"r{i}={r}", "-F", f"n{i}={int(n)}"]
+    scope = search_scope() if texts else ""
+    for i, t in enumerate(texts):
+        decls.append(f"$q{i}:String!")
+        parts.append(f"s{i}:search(type:ISSUE,first:8,query:$q{i}){{nodes{{... on PullRequest{{{PR_FACTS}}}}}}}")
+        fields += ["-f", f"q{i}={scope} is:pr {t} sort:updated-desc"]
+    if not parts:
+        die("no PR found (pass a URL, repo#n, number, or search text)")
+    query = "query" + (f"({','.join(decls)})" if decls else "") + "{" + " ".join(parts) + "}"
+    p = proc.run(["gh", "api", "graphql", "-f", f"query={query}", *fields])
+    try:
+        d = (json.loads(p.stdout or "{}").get("data") or {})
+    except json.JSONDecodeError:
+        d = {}
+    if p.returncode and not d:
+        # gh itself failed (auth, network): say so, don't claim every PR is NOT FOUND
+        die(f"gh failed: {p.stderr.strip()[:400]}")
+    found = [(d.get(f"p{i}") or {}).get("pullRequest") for i in range(len(refs))]
+    hits = [[x for x in ((d.get(f"s{i}") or {}).get("nodes") or []) if x] for i in range(len(texts))]
+    every = [x for x in found if x] + [x for h in hits for x in h]
+    with ThreadPoolExecutor(8) as ex:
+        deploys = dict(zip((x["url"] for x in every), ex.map(live_deploy, every)))
+    for (o, r, n), pr in zip(refs, found):
+        print(fact_line(pr, deploys.get(pr["url"])) if pr else f"{r}#{n}  NOT FOUND")
+    for t, h in zip(texts, hits):
+        print(f"search {t!r}: {len(h)} match(es)" + ("" if h else " — try another word"))
+        for x in h:
+            print("  " + fact_line(x, deploys.get(x["url"])).replace("\n", "\n  "))
+
+
+def cmd_guide(argv):
+    topic = argv[0] if argv else None
+    if topic not in GUIDES:
+        if topic:
+            print(f"ship: unknown guide {topic!r}", file=sys.stderr)
+        print("ship guide <topic>: " + ", ".join(GUIDES), file=sys.stderr)
+        sys.exit(2 if topic else 0)
+    print(guide_text(topic), end="")
+
+
+def cmd_policy(argv):
+    repo = argv[0] if argv else None
+    if not repo:
+        ref = resolve_pr(None)
+        repo = ref[1] if ref else die("pass a repo name")
+    print(json.dumps(load_policy(repo), indent=1))
+
+
+def main(argv):
+    # help anywhere, e.g. `ship pr --help`, prints help instead of searching GitHub for "--help"
+    if any(a in ("-h", "--help", "help") for a in argv):
+        print(__doc__.strip())
+        return
+    if argv and argv[0] == "review":
+        return cmd_review(argv[1:])
+    if argv and argv[0] == "rescue":
+        return cmd_rescue(argv[1:])
+    if argv and argv[0] == "pr":
+        return cmd_pr(argv[1:])
+    if argv and argv[0] == "policy":
+        return cmd_policy(argv[1:])
+    if argv and argv[0] == "guide":
+        return cmd_guide(argv[1:])
+    if argv and argv[0] == "findings":
+        return cmd_findings(argv[1:])
+    cmd_status(argv)
+
+
+if __name__ == "__main__":
+    import fleet_term
+    fleet_term.protect_stdout()  # PR titles, branch names and bot text are untrusted
+    main(sys.argv[1:])

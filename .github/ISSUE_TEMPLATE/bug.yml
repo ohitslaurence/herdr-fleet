@@ -1,0 +1,25 @@
+name: Bug
+description: Something does the wrong thing, or the right thing badly.
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: The command you ran and its output. Check it for anything private first.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`fleet doctor --json` and `fleet version`"
+      description: Versions and what is installed (no keys). It names paths and repos, so edit out anything private.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: herdr
+    attributes:
+      label: herdr version and OS
+      placeholder: "herdr 0.9.x, Ubuntu 24.04"
+    validations:
+      required: true

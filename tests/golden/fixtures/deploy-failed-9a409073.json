@@ -1,0 +1,201 @@
+{
+ "calls": {
+  "deploy:abb72139173be82d18ce06913b896b83f4b51735": [
+   "deploy-failed",
+   "word-1 word-2 word-3"
+  ],
+  "files": [
+   "src/f0",
+   "src/f1",
+   "src/f2",
+   "src/f3",
+   "src/f4"
+  ],
+  "prev": {
+   "head": "22aaefba188b263e9f6f4e181a8a70b73cd368b3",
+   "review": null
+  }
+ },
+ "expected": {
+  "act": null,
+  "detail": "word-1 word-2 word-3",
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": null,
+  "next": "investigate the failed post-merge run(s), report to the user; do not push to main",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "deploy-failed",
+  "tier": null
+ },
+ "now": "2026-10-19T10:49:08.761593+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": null,
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 5,
+  "comments": {
+   "nodes": []
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-10-15T10:46:01Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38722607027,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-15T10:46:16Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38722607027,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SKIPPED",
+          "detailsUrl": "https://example.invalid/url-2",
+          "isRequired": false,
+          "name": "check-2",
+          "startedAt": "2026-10-15T10:47:07Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 38722607027,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SKIPPED",
+          "detailsUrl": "https://example.invalid/url-3",
+          "isRequired": false,
+          "name": "check-3",
+          "startedAt": "2026-10-15T10:47:07Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-10-15T10:46:09Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f0"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f1"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f2"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f3"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f4"
+    }
+   ]
+  },
+  "headRefName": "branch-11",
+  "headRefOid": "22aaefba188b263e9f6f4e181a8a70b73cd368b3",
+  "isDraft": false,
+  "labels": {
+   "nodes": [
+    {
+     "name": "agent:claude"
+    }
+   ]
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": {
+   "oid": "abb72139173be82d18ce06913b896b83f4b51735"
+  },
+  "mergeStateStatus": "UNKNOWN",
+  "mergeable": "UNKNOWN",
+  "merged": true,
+  "mergedAt": "2026-10-15T10:49:59Z",
+  "number": 11,
+  "reviewDecision": null,
+  "reviewThreads": {
+   "nodes": [],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": []
+  },
+  "state": "MERGED",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 11",
+  "url": "https://github.com/acme/app/pull/11"
+ }
+}

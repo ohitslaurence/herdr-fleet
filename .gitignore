@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+secrets.env
+PLANS.md
+.venv/
+.DS_Store
+*.egg-info/

@@ -1,0 +1,848 @@
+{
+ "calls": {
+  "deploy:b808109b1d6e22febc22828b795af9a54409e150": [
+   "deploying",
+   "word-1"
+  ],
+  "files": [
+   "src/f0",
+   "protected/f1",
+   "protected/f2",
+   "protected/f3",
+   "protected/f4",
+   "protected/f5",
+   "src/f6",
+   "src/f7",
+   "src/f8",
+   "src/f9"
+  ],
+  "prev": {
+   "head": "18fbf031e47ee2a4ac5006277edf0d30d8238e26",
+   "head_seen_at": "2026-10-19T08:33:19+00:00",
+   "review": {
+    "critical_impact": true,
+    "findings_by_round": [
+     5,
+     3,
+     1,
+     0
+    ],
+    "present": true,
+    "provider": "greptile",
+    "retag_pending": false,
+    "retag_unanswered": false,
+    "reviewed_head": true,
+    "reviewed_sha": "18fbf031e47ee2a4ac5006277edf0d30d8238e26",
+    "rounds": 3,
+    "score": 5,
+    "verdict_at": "2026-10-19T08:36:44Z"
+   }
+  }
+ },
+ "expected": {
+  "act": null,
+  "detail": "word-1",
+  "failing": null,
+  "lines_since_review": null,
+  "never_started": null,
+  "next": "wait: `ship --wait`",
+  "optional_failing": null,
+  "pending": null,
+  "rereviews_left": null,
+  "state": "deploying",
+  "tier": null
+ },
+ "now": "2026-10-19T10:49:01.348217+00:00",
+ "policy": {
+  "admin": false,
+  "checks": "required",
+  "cross_review": false,
+  "deploy": "actions",
+  "human_paths": [
+   "protected/*"
+  ],
+  "max_free_reviews": 4,
+  "merge": "ask",
+  "method": "squash",
+  "repo_file_ignored": [],
+  "require_selfreview": true,
+  "review": "greptile",
+  "tier": "critical",
+  "tiers": {
+   "critical": {
+    "fixup_max_lines": 15,
+    "free_review_first": true,
+    "max_rereviews": 3,
+    "min_score": 5
+   },
+   "normal": {
+    "fixup_max_lines": 80,
+    "free_review_first": false,
+    "max_rereviews": 1,
+    "min_score": 4
+   }
+  }
+ },
+ "pr": {
+  "baseRefName": "main",
+  "changedFiles": 10,
+  "comments": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "greptile_confidence_score:5\nConfidence Score: 5/5\nLast reviewed commit: https://github.com/acme/app/commit/18fbf031e47ee2a4ac5006277edf0d30d8238e26\n[Critical impact]",
+     "createdAt": "2026-10-19T08:16:16Z",
+     "updatedAt": "2026-10-19T08:36:44Z",
+     "url": "https://example.invalid/url-4"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "<!-- fleet-self-review sha=6554b13cda0035274d2159087c1b0c2b88360374 -->",
+     "createdAt": "2026-10-19T08:21:16Z",
+     "updatedAt": "2026-10-19T08:21:16Z",
+     "url": "https://example.invalid/url-5"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "@greptileai please re-review the latest commit",
+     "createdAt": "2026-10-19T08:21:19Z",
+     "updatedAt": "2026-10-19T08:21:19Z",
+     "url": "https://example.invalid/url-6"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "<!-- fleet-self-review sha=c027de5e3a381e3c2d040fbbfdd66e0a20310cdf -->",
+     "createdAt": "2026-10-19T08:28:33Z",
+     "updatedAt": "2026-10-19T08:28:33Z",
+     "url": "https://example.invalid/url-7"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "@greptileai please re-review the latest commit",
+     "createdAt": "2026-10-19T08:28:36Z",
+     "updatedAt": "2026-10-19T08:28:36Z",
+     "url": "https://example.invalid/url-8"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "<!-- fleet-self-review sha=18fbf031e47ee2a4ac5006277edf0d30d8238e26 -->",
+     "createdAt": "2026-10-19T08:33:31Z",
+     "updatedAt": "2026-10-19T08:33:31Z",
+     "url": "https://example.invalid/url-9"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "@greptileai please re-review the latest commit",
+     "createdAt": "2026-10-19T08:33:35Z",
+     "updatedAt": "2026-10-19T08:33:35Z",
+     "url": "https://example.invalid/url-10"
+    }
+   ]
+  },
+  "commits": {
+   "nodes": [
+    {
+     "commit": {
+      "committedDate": "2026-10-19T08:33:03Z",
+      "statusCheckRollup": {
+       "contexts": {
+        "nodes": [
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 39223591914,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-1",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-19T08:33:28Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": {
+            "databaseId": 39223585545,
+            "workflow": {
+             "name": "workflow-1"
+            }
+           }
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-2",
+          "isRequired": false,
+          "name": "check-1",
+          "startedAt": "2026-10-19T08:33:26Z",
+          "status": "COMPLETED"
+         },
+         {
+          "__typename": "CheckRun",
+          "checkSuite": {
+           "workflowRun": null
+          },
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://example.invalid/url-3",
+          "isRequired": false,
+          "name": "check-2",
+          "startedAt": "2026-10-19T08:33:41Z",
+          "status": "COMPLETED"
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "createdAt": "2026-10-19T08:10:48Z",
+  "files": {
+   "nodes": [
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f0"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "protected/f1"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f2"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f3"
+    },
+    {
+     "changeType": "ADDED",
+     "path": "protected/f4"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "protected/f5"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f6"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f7"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f8"
+    },
+    {
+     "changeType": "MODIFIED",
+     "path": "src/f9"
+    }
+   ]
+  },
+  "headRefName": "branch-102",
+  "headRefOid": "18fbf031e47ee2a4ac5006277edf0d30d8238e26",
+  "isDraft": false,
+  "labels": {
+   "nodes": [
+    {
+     "name": "agent:claude"
+    }
+   ]
+  },
+  "latestOpinionatedReviews": {
+   "nodes": []
+  },
+  "mergeCommit": {
+   "oid": "b808109b1d6e22febc22828b795af9a54409e150"
+  },
+  "mergeStateStatus": "UNKNOWN",
+  "mergeable": "UNKNOWN",
+  "merged": true,
+  "mergedAt": "2026-10-19T10:24:17Z",
+  "number": 102,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "reviewThreads": {
+   "nodes": [
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P1\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": false,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:21:07Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P1\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": false,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:21:09Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:21:10Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:21:12Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:21:13Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P1\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": false,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:28:21Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:28:22Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:28:24Z"
+       }
+      ]
+     }
+    },
+    {
+     "comments": {
+      "nodes": [
+       {
+        "author": {
+         "login": "greptile-apps"
+        },
+        "body": "alt=\"P2\""
+       },
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "body": "(text)"
+       }
+      ],
+      "totalCount": 2
+     },
+     "isOutdated": true,
+     "isResolved": true,
+     "last": {
+      "nodes": [
+       {
+        "author": {
+         "login": "user-1"
+        },
+        "createdAt": "2026-10-19T08:33:16Z"
+       }
+      ]
+     }
+    }
+   ],
+   "pageInfo": {
+    "hasNextPage": false
+   }
+  },
+  "reviews": {
+   "nodes": [
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": null
+       },
+       {
+        "replyTo": null
+       },
+       {
+        "replyTo": null
+       },
+       {
+        "replyTo": null
+       },
+       {
+        "replyTo": null
+       }
+      ],
+      "totalCount": 5
+     },
+     "commit": {
+      "oid": "bfa6e4d4c6a57914a94214f10f2fe839a94a8f46"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:16:22Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-1"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:21:07Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-2"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:21:09Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-3"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:21:10Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-4"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:21:12Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-5"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:21:13Z"
+    },
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": null
+       },
+       {
+        "replyTo": null
+       },
+       {
+        "replyTo": null
+       }
+      ],
+      "totalCount": 3
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:25:48Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-6"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "6554b13cda0035274d2159087c1b0c2b88360374"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:28:21Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-7"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "c027de5e3a381e3c2d040fbbfdd66e0a20310cdf"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:28:22Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-8"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "c027de5e3a381e3c2d040fbbfdd66e0a20310cdf"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:28:24Z"
+    },
+    {
+     "author": {
+      "login": "greptile-apps"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": null
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "c027de5e3a381e3c2d040fbbfdd66e0a20310cdf"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:32:05Z"
+    },
+    {
+     "author": {
+      "login": "user-1"
+     },
+     "body": "",
+     "comments": {
+      "nodes": [
+       {
+        "replyTo": {
+         "id": "id-9"
+        }
+       }
+      ],
+      "totalCount": 1
+     },
+     "commit": {
+      "oid": "c027de5e3a381e3c2d040fbbfdd66e0a20310cdf"
+     },
+     "state": "COMMENTED",
+     "submittedAt": "2026-10-19T08:33:16Z"
+    }
+   ]
+  },
+  "state": "MERGED",
+  "timelineItems": {
+   "nodes": []
+  },
+  "title": "PR 102",
+  "url": "https://github.com/acme/app/pull/102"
+ }
+}

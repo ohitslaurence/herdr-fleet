@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""fleet-watch — the merge/deploy watcher and attention inbox (run as `fleet watch`).
+
+Polls herdr for agent panes and GitHub for the PR on each pane's branch, then:
+  - PR merged      → prompts the pane to run `ship` and follow the deploy
+  - PR closed      → prompts the pane to stop, and adds an inbox item
+  - "want me to…?" → in a worktree pane, answers safe offers itself (policy [watch]
+                     auto_reply); anything about merging, deploying, commits/PRs,
+                     money, prod or a choice between options goes to the inbox
+  - blocked pane   → inbox (+ ntfy) once blocked longer than blocked_minutes
+An inbox item resolves itself when its pane goes back to work.
+
+  fleet watch [--once] [--dry-run] [--interval S]
+  fleet inbox [--json] | fleet inbox done <id> | --all
+
+Also the fleet's long-running process (fleet_serve): herdr events wake it as soon as an agent
+changes state (polling every --interval stays as the fallback, and for GitHub), it refreshes
+the cockpit's PR data in-process, and it answers the cockpit and `fleet ls` from memory over
+~/.local/state/fleet/serve.sock (ops: ping, rows, refresh, inbox).
+
+Talks to panes only through herdr, so it works the same for claude and codex.
+State: ~/.local/state/fleet/watch.json. Config: [watch] in the fleet config (`fleet config show watch`).
+"""
+import hashlib, json, os, re, subprocess, sys, threading, time, urllib.request
+from datetime import datetime, timezone
+
+STATE_DIR = os.path.expanduser("~/.local/state/fleet")
+STATE = os.path.join(STATE_DIR, "watch.json")
+# An offer is a question that hands the next step back to the human.
+OFFER = re.compile(
+    r"(want me to|should i\b|shall i\b|would you like me to|do you want me to|"
+    r"let me know if you(?:'d)? (?:like|want) me to|if you(?:'d)? like,? i can|ready (?:for me )?to [^.?]*\?)",
+    re.I)
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fleet_config  # noqa: E402
+import fleet_orch  # noqa: E402
+import fleet_proc  # noqa: E402
+
+# Offers that stay with the human: irreversible, shared, money, prod, or a user rule
+# (commits and PRs only when asked).
+HUMAN_WORDS = (
+    r"merg\w*|main|master|deploy\w*|prod\w*|release|publish|delet\w*|drop|close|force|"
+    r"reset|revert|rollback|migrat\w*|refund\w*|credit\w*|payout\w*|pay\w*|secret\w*|token\w*|"
+    r"credential\w*|rotat\w*|sudo|rm -rf|commit\w*|push\w*|prs?|pull request|dev done|"
+    r"approv\w*|send|email|slack|customer\w*|user's|schema\w*|table|database|db|sql|"
+    r"infra\w*|terraform|sst|env|config|dependenc\w*|upgrad\w*|"
+    # money and ops: anything that acts on the outside world rather than the worktree
+    r"transfer\w*|withdraw\w*|wire\w*|ledger\w*|balance\w*|backfill\w*|kyc|webhook\w*|jobs?|"
+    r"scripts?|cron\w*|queue\w*|replay\w*|reprocess\w*|resend\w*|settle\w*|invoice\w*|charg\w*|"
+    r"fund\w*|money|usd|usdc|wallet\w*|onchain|on-chain|lambda\w*|aws|ssm|invoke\w*|backfill\w*|"
+    r"card\w*|notif\w*|sms|"
+    # leaves the worktree, or weakens a check: an allowlisted verb ("fix", "check", "continue")
+    # must not carry these through (security review 2026-10-17, see tests/test_watch_rules.py)
+    r"staging|stage|sandbox|cluster|kubectl|k8s|helm|docker|ssh|scp|bastion|server\w*|remote\w*|origin|"
+    r"curl|wget|install\w*|chmod|chown|admin|root|skip\w*|disabl\w*|ignor\w*|bypass\w*|no-verify|"
+    r"--force|xfail|todo\.skip|\.only|sleep|retry|retries|timeout\w*|"
+    r"api|endpoint|prod|live|external|third[- ]party|key\w*|log ?in|auth\w*")
+# [watch] human_words in config.toml add your own (vendors, products, internal systems); they
+# can only widen the veto, never narrow it.
+HUMAN = re.compile(r"\b(" + "|".join([HUMAN_WORDS] + fleet_config.human_words()) + r")\b|\$\d|\|\s*(ba|z)?sh\b",
+                   re.I)
+# Auto-approval is an allowlist: only small, reversible next steps. Anything else
+# ("build it", "go that way", a plan, a new feature) is a decision for the human.
+SAFE = re.compile(
+    # run/retry only for local checks: "retry the failed wire" must not be a yes
+    r"\b(fix(es)?|investigate|look into|dig into|check|debug|"
+    r"(re-?)?run (the |those |these |all )?(unit |integration |e2e )?(tests?|specs?|checks?|lint|linter|typecheck|"
+    r"type-?check|build|suite|formatter)|"
+    r"add (a |the )?(regression )?tests?|write (a |the )?tests?|keep going|continue|carry on|"
+    r"proceed with (the )?(next|remaining) (step|item|one)s?)\b(?!.*\b(and|then)\b.*\b(build|implement)\b)",
+    re.I)
+CHOICE = re.compile(r"\b(or|option [a-z0-9]|which (one|of))\b", re.I)
+PROMPT_LINE = re.compile(r"^\s*(❯|›)(\s|$)")
+NOISE = re.compile(r"^\s*([─━│╭╰╮╯]+|[✻✳✶✽·•※⏵]\s*(Churned|Worked|Cooked|Baked|Brewed|Sautéed|recap|auto mode)|"
+                   r"esc to interrupt|\? for shortcuts|Worked for \d)", re.I)
+
+AUTO_REPLY = ("Yes, go ahead. (fleet watch: this is a reversible, in-scope step, so it was approved "
+              "automatically. Don't ask before steps like this. Stop and ask only for decisions between "
+              "options, merges, deploys, commits/PRs your brief doesn't cover, or anything touching money or prod.)")
+
+
+def now():
+    return time.time()
+
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run(*args, cwd=None, timeout=30):
+    """stdout, or None on failure. A hung herdr/gh/git must not stop the watch: 30 s and out."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, cwd=cwd, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def config():
+    return dict(fleet_config.load()["watch"])
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            s = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        s = {}
+    for k, v in (("prs", {}), ("seq", {}), ("offers", {}), ("blocked", {}), ("pending", {}), ("inbox", [])):
+        s.setdefault(k, v)
+    return s
+
+
+def save_state(s):
+    """Locked write that keeps dismissals made on disk meanwhile (`fleet inbox done` runs in
+    another process): an item closed there stays closed, whatever this process remembers."""
+    from fleet_state import locked, read, write
+    with locked(STATE):
+        try:
+            disk = read(STATE)
+        except RuntimeError:
+            disk = {}
+        closed = {i["id"]: i for i in disk.get("inbox", []) if not i.get("open")}
+        for i in s.get("inbox", []):
+            if i.get("open") and i.get("id") in closed:
+                i["open"], i["resolved"] = False, closed[i["id"]].get("resolved")
+        write(STATE, s)
+
+
+def agents():
+    return fleet_proc.herdr_agents()  # raises HerdrDown: a pass must not read a dead herdr as "every pane gone"
+
+
+_REMOTE = {}
+
+
+def git_info(cwd):
+    """(owner/repo, branch) for a pane's checkout, or None. Runs every pass for every pane, so
+    the branch is read from git's files and the remote is cached per checkout (no processes)."""
+    from fleet_paths import head_branch
+    branch = head_branch(cwd)
+    if not branch or branch in ("HEAD", "main", "master"):
+        return None
+    if cwd not in _REMOTE:
+        url = run("git", "-C", cwd, "remote", "get-url", "origin") or ""
+        m = re.search(r"github\.com[:/]([^/]+/[^/.\s]+?)(?:\.git)?\s*$", url.strip())
+        _REMOTE[cwd] = m.group(1) if m else None
+    return (_REMOTE[cwd], branch) if _REMOTE[cwd] else None
+
+
+VETO_LINES = 400  # how far back the HUMAN veto reads: past anything an agent prints in one turn
+
+
+def pane_output(pane, lines=VETO_LINES):
+    """The agent's output above its input box, minus status/footer noise, oldest first."""
+    out = run("herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", str(lines))
+    if not out:
+        return []
+    raw = out.splitlines()
+    cut = max((i for i, l in enumerate(raw) if PROMPT_LINE.match(l)), default=len(raw))
+    return [l.rstrip() for l in raw[:cut] if l.strip() and not NOISE.match(l)]
+
+
+def last_message(pane):
+    """The agent's last words above its input box (12 lines): what an offer is found in."""
+    return "\n".join(pane_output(pane)[-12:])
+
+
+def agent_now(pane):
+    out = run("herdr", "agent", "get", pane)
+    if not out:
+        return None
+    r = json.loads(out).get("result", {})
+    return r.get("agent", r)
+
+
+def recent_text(pane, lines=120):
+    return run("herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", str(lines)) or ""
+
+
+def pr_state(url):
+    out = run("gh", "pr", "view", url, "--json", "state")
+    return json.loads(out)["state"] if out else None
+
+
+def knows_pr_outcome(text, url, state):
+    """The pane already shows this PR's outcome: the user said so, or the agent saw it."""
+    n = url.rstrip("/").rsplit("/", 1)[-1]
+    ref = rf"(#{n}\b|/pull/{n}\b)"
+    # past tense only: "once #85 is merged" is a plan, "#85 was merged" is news
+    done = r"\b(was|has been|got|is now|now|just|already)\s+(merged|deployed|closed)\b|\bmerged (it|this|that)\b"
+    if state == "MERGED":
+        ship_line = rf"#{n}\s+(deployed|deploying|deploy-gated|deploy-failed)\b"
+        if re.search(ship_line, text):
+            return True
+    if re.search(rf"{ref}[^\n]*({done})|({done})[^\n]*{ref}", text, re.I):
+        return True
+    # the user typed "merged"/"deployed" at the prompt themselves
+    return state == "MERGED" and bool(re.search(r"^\s*(❯|›)\s*(merged|deployed|it'?s merged|i merged)\b", text, re.I | re.M))
+
+
+def find_offer(text):
+    """The offer the agent ends on: only its last two sentences count, so an offer-shaped line
+    buried earlier (or followed by more output) isn't what gets answered."""
+    tail = " ".join(text.splitlines()[-6:])
+    sentences = [s for s in re.split(r"(?<=[.?!])\s+", tail) if s.strip()]
+    for s in reversed(sentences[-2:]):
+        low = s.lower()
+        if OFFER.search(s) and ("?" in s or "let me know" in low or "if you'd like" in low or "if you like" in low):
+            return s.strip()
+    return None
+
+
+def is_human(offer, context=""):
+    """True unless the offer is an allowlisted small step and nothing risky is in sight.
+    The whole message counts: "Want me to build it?" after a refund plan is about money."""
+    if HUMAN.search(offer) or HUMAN.search(context):
+        return True
+    if CHOICE.search(offer) and " or not" not in offer.lower():
+        return True
+    return not SAFE.search(offer)
+
+
+def _redact(text):
+    from fleet_redact import redact
+    return redact(text)
+
+
+_LINKED = {}
+
+
+def linked_worktree(cwd):
+    """Cached per cwd: panes don't change checkout, and the watch asks every tick."""
+    if cwd not in _LINKED:
+        from fleet_paths import is_linked_worktree
+        _LINKED[cwd] = bool(cwd) and is_linked_worktree(cwd)
+    return _LINKED[cwd]
+
+
+def rule_outcome(offer, msg, worktree, auto_reply):
+    """What the regex rules decide, in the same words a proposal uses, for the shadow log."""
+    if not worktree:
+        return "inbox: not a dev worktree"
+    if not auto_reply:
+        return "inbox: auto_reply off"
+    for name, rx, text in (("veto", HUMAN, offer), ("veto (message)", HUMAN, msg)):
+        m = rx.search(text)
+        if m:
+            return f"inbox: {name} '{m.group(0)}'"
+    if CHOICE.search(offer) and " or not" not in offer.lower():
+        return "inbox: choice"
+    return "auto-reply" if SAFE.search(offer) else "inbox: not on the safe list"
+
+
+OFFER_QUESTIONS = {
+    "kind": {"type": "choice",
+             "instructions": "What kind of step is the agent offering to take in `offer`? Read `agent_last_output` "
+                             "for what the step would actually do.",
+             "criteria": {"local-reversible": "Only edits files in its own worktree or runs local checks (tests, lint, "
+                                              "typecheck, build); easy to undo; nothing leaves this machine.",
+                          "git-local": "A local git commit, branch or stash operation that is not pushed.",
+                          "outside-world": "Pushes, opens or merges a PR, deploys, runs anything against staging or "
+                                           "production, moves money, touches credentials, data or other people.",
+                          "choose-between-options": "Asks the user to pick between approaches or make a judgment call.",
+                          "scope-expansion": "Starts new work beyond the current task."}},
+    "in_scope": {"type": "noul",
+                 "instructions": "Is the offered step part of finishing the work described in `task` (or, if `task` "
+                                 "is empty, the work visible in `agent_last_output`)?"},
+    # concrete beats vague: "would a lead approve" sat near 0.5 (= unsure) for everything
+    "harm_if_wrong": {"type": "noul",
+                      "instructions": "If the agent did the step in `offer` and it turned out to be a mistake, would "
+                                      "undoing it take more than discarding local changes in the agent's own worktree?",
+                      "criteria": {"true": "Something outside the worktree changed, or real work would be lost.",
+                                   "false": "At worst, local edits or test runs to throw away."}},
+    "needs_judgment": {"type": "noul",
+                       "instructions": "Does answering `offer` need the user's preference or a product/design "
+                                       "judgment, rather than a plain go-ahead?"},
+}
+
+
+def propose_offer(answers, offer, msg):
+    """Jev's proposal. The HUMAN veto is absolute: Jev may widen the SAFE allowlist, never this."""
+    veto = HUMAN.search(offer) or HUMAN.search(msg)
+    kind = answers["kind"]
+    if veto:
+        return f"inbox: veto '{veto.group(0)}'"
+    # starting thresholds; the shadow log (fleet why --stats watch.offer) is how they get tuned
+    if kind["choice"] != "local-reversible" or kind["probabilities"]["local-reversible"] < 0.9:
+        return f"inbox: {kind['choice']}"
+    if answers["harm_if_wrong"]["noul"] > 0.3:
+        return "inbox: harm if wrong"
+    if answers["needs_judgment"]["noul"] >= 0.75:
+        return "inbox: needs judgment"
+    return "auto-reply"
+
+
+def shadow_offer(pane, cwd, offer, msg, info, pr, rule, seen=""):
+    """Decision layer, shadow mode: log what Jev would do next to
+    what the regex rule did. Runs off the watch thread; never affects the reply."""
+    try:
+        import fleet_decide as F
+        extra = {"offer": offer, "agent_last_output": msg[-1500:], "repo": info[0] if info else ""}
+        if pr:
+            extra["pr"] = {"title": pr.get("title"), "state": pr.get("state")}
+        state = F.context(cwd=cwd, pr=(info[0], pr["number"]) if info and pr else None, extra=extra)
+        F.decide("watch.offer", action="auto-reply yes to the agent's offer",
+                 why="keep agents moving on routine in-scope local steps without the human approving each one",
+                 state=state, questions=OFFER_QUESTIONS, subject=pane, rule=rule,
+                 propose=lambda a: propose_offer(a, offer, seen or msg))
+    except Exception:
+        pass
+
+
+INBOX_MAX_OPEN, INBOX_MAX_ITEMS = 100, 500
+INBOX_OPEN_DAYS, INBOX_KEEP_DAYS = 3, 7
+
+
+def prune_inbox(s, cfg=None):
+    """Open items expire after inbox_open_days and at most inbox_max_open stay open (oldest close
+    first); closed ones are kept inbox_keep_days, and the file never holds more than
+    inbox_max_items ([watch] settings). The inbox is for what needs the human now, not a log."""
+    cfg = cfg or {}
+    open_days, max_open = cfg.get("inbox_open_days", INBOX_OPEN_DAYS), cfg.get("inbox_max_open", INBOX_MAX_OPEN)
+    keep_days, max_items = cfg.get("inbox_keep_days", INBOX_KEEP_DAYS), cfg.get("inbox_max_items", INBOX_MAX_ITEMS)
+    def age_days(i):
+        return (now() - datetime.fromisoformat(i["ts"].replace("Z", "+00:00")).timestamp()) / 86400
+    for i in s["inbox"]:
+        if i["open"] and age_days(i) > open_days:
+            i["open"], i["resolved"] = False, iso(now())
+    open_items = sorted((i for i in s["inbox"] if i["open"]), key=lambda i: i["ts"])
+    for i in open_items[:max(0, len(open_items) - max_open)]:
+        i["open"], i["resolved"] = False, iso(now())
+    s["inbox"] = [i for i in s["inbox"] if i["open"] or age_days(i) <= keep_days][-max_items:]
+
+
+def key(*parts):
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
+
+
+class Watch:
+    def __init__(self, cfg, dry):
+        self.cfg, self.dry, self.s = cfg, dry, load_state()
+        self.log = []
+
+    def say(self, msg):
+        line = f"{iso(now())} {msg}"
+        self.log.append(line)
+        print(line, flush=True)
+
+    def prompt(self, pane, text):
+        self.say(f"prompt {pane}: {text[:100]}")
+        if not self.dry:
+            run("herdr", "agent", "prompt", pane, text)
+
+    def send(self, m):
+        """Re-check, right before sending, that the message is still true and still needed.
+        -> True if sent, False if dropped, None if it should wait for the pane."""
+        pane = m["pane"]
+        a = agent_now(pane)
+        if not a:
+            self.say(f"dropped {pane}: pane is gone")
+            return False
+        if a.get("agent_status") not in ("idle", "done"):
+            return None
+        if m["kind"] == "pr":
+            info = git_info(a.get("cwd", ""))
+            if not info or info[1] != m["branch"]:
+                self.say(f"dropped {pane}: pane is no longer on {m['branch']}")
+                return False
+            if pr_state(m["url"]) != m["state"]:
+                self.say(f"dropped {pane}: {m['url']} is no longer {m['state']}")
+                return False
+            if knows_pr_outcome(recent_text(pane), m["url"], m["state"]):
+                self.say(f"dropped {pane}: already knows {m['url']} is {m['state'].lower()}")
+                return False
+        elif m["kind"] == "offer":
+            if str(a.get("state_change_seq")) != m["seq"] or key(find_offer(last_message(pane)) or "") != m["offer"]:
+                self.say(f"dropped {pane}: the offer was already answered or moved on")
+                return False
+        self.prompt(pane, m["text"])
+        return True
+
+    def inbox(self, pane, cwd, kind, text, pr=None):
+        k = key(pane, kind, text)
+        if any(i["id"] == k for i in self.s["inbox"]):
+            return
+        # one open item per pane and kind: the newest says what it needs now. An agent that
+        # keeps rewording its offer must not be able to flood the human's inbox.
+        for i in self.s["inbox"]:
+            if i["open"] and i["pane"] == pane and i["kind"] == kind:
+                i["open"], i["resolved"] = False, iso(now())
+        item = {"id": k, "ts": iso(now()), "pane": pane, "cwd": cwd, "kind": kind,
+                "text": text, "pr": pr, "open": True}
+        self.s["inbox"].append(item)
+        prune_inbox(self.s, self.cfg)
+        if not self.dry:
+            import fleet_events
+            fleet_events.append(STATE_DIR, "inbox", what=kind, where=os.path.basename(cwd or "") or pane, text=text,
+                                pr=pr)
+        self.say(f"inbox {kind} {pane}: {text[:100]}")
+        topic = self.cfg.get("ntfy_topic")
+        if topic and not self.dry and kind in ("blocked", "decision", "pr-closed"):
+            try:
+                req = urllib.request.Request(
+                    f"https://ntfy.sh/{topic}", data=_redact(text)[:300].encode(),  # ntfy.sh topics are public
+                    headers={"Title": f"fleet: {kind} in {os.path.basename(cwd)}"})
+                urllib.request.urlopen(req, timeout=10)
+            except OSError as e:
+                self.say(f"ntfy failed: {e}")
+
+    def tick(self):
+        cfg, s = self.cfg, self.s
+        live = agents()
+        by_pane = {a["pane_id"]: a for a in live}
+        infos = {a["pane_id"]: git_info(a["cwd"]) if a.get("cwd") else None for a in live}
+        # every pane's PR in one GraphQL call; a pair missing from `prs` is unknown this pass
+        from fleet_gh import prs_for_branches
+        prs = prs_for_branches([i for i in infos.values() if i])
+        for a in live:
+            try:
+                pane, cwd, status = a["pane_id"], a.get("cwd", ""), a.get("agent_status")
+                # an agent's own checkout (any layout), not a canonical clone: only those auto-reply
+                worktree = linked_worktree(cwd)
+                info = infos[pane]
+
+                # 1. PR lifecycle on this pane's branch
+                if info:
+                    pr = prs.get(info)
+                    if pr:
+                        self.pr_event(pane, cwd, status, pr)
+
+                # 2. blocked panes
+                if status == "blocked":
+                    since = s["blocked"].setdefault(pane, now())
+                    if now() - since > cfg["blocked_minutes"] * 60:
+                        self.inbox(pane, cwd, "blocked", last_message(pane)[-400:] or "blocked")
+                else:
+                    s["blocked"].pop(pane, None)
+
+                # 3. offers: read the pane once per state change, only while it waits
+                seq = str(a.get("state_change_seq"))
+                if status in ("idle", "done") and s["seq"].get(pane) != seq:
+                    s["seq"][pane] = seq
+                    body = pane_output(pane)
+                    msg = "\n".join(body[-12:])
+                    # the veto reads everything the agent printed, not just the window the offer
+                    # was found in: injected output must not push a dangerous question out of view
+                    seen = "\n".join(body)
+                    offer = find_offer(msg)
+                    if offer and s["offers"].get(pane) != key(offer):
+                        s["offers"][pane] = key(offer)
+                        if not self.dry:
+                            threading.Thread(target=shadow_offer, daemon=True, args=(
+                                pane, cwd, offer, msg, info, pr if info else None,
+                                rule_outcome(offer, seen, worktree, cfg["auto_reply"]), seen)).start()
+                        if worktree and cfg["auto_reply"] and not is_human(offer, seen):
+                            self.send({"kind": "offer", "pane": pane, "text": cfg.get("auto_reply_text") or AUTO_REPLY,
+                                       "seq": seq, "offer": key(offer)})
+                        else:
+                            self.inbox(pane, cwd, "decision", offer)
+
+                # deferred notices (pane was busy when its PR changed)
+                if status in ("idle", "done") and pane in s["pending"]:
+                    m = s["pending"][pane]
+                    if isinstance(m, dict) and self.send(m) is None:
+                        continue
+                    s["pending"].pop(pane)
+            except Exception as e:  # one bad pane (odd cwd, herdr hiccup) must not starve the rest
+                self.say(f"pane {a.get('pane_id')}: {e!r}")
+
+        # 4. orchestrators: an idle orchestrator isn't watching `orch wait`; tell it which workers finished
+        self.orch_report(by_pane)
+
+        # 5. resolve inbox items whose pane went back to work or disappeared
+        for item in s["inbox"]:
+            a = by_pane.get(item["pane"])
+            if item["open"] and (a is None or a.get("agent_status") == "working"):
+                item["open"] = False
+                item["resolved"] = iso(now())
+        prune_inbox(s, cfg)
+        if not self.dry:
+            save_state(s)
+
+    def orch_report(self, by_pane):
+        home = fleet_orch.home()
+        for pane, workers in fleet_orch.unreported(home).items():
+            a = by_pane.get(pane)
+            if a and a.get("agent_status") not in ("idle", "done"):
+                continue  # busy: its own `orch wait` will show them, or the next pass will
+            if a:
+                # names and states only: a status line is worker-written text, not ours to relay
+                names = ", ".join(f"{name} ({state})" for name, state, _ in workers)
+                self.prompt(pane, f"orch: {names} finished. Run `orch wait` to see their status lines, "
+                                  f"then `orch report <name>`.")
+            if not self.dry:
+                for name, _, line in workers:
+                    fleet_orch.mark_notified(home, name, line)
+
+    def pr_event(self, pane, cwd, status, pr):
+        s, url, state = self.s, pr["url"], pr["state"]
+        prev = s["prs"].get(url)
+        s["prs"][url] = state
+        if prev == state:
+            return
+        if state == "MERGED":
+            if prev is None:  # first sight: only announce recent merges
+                merged = datetime.fromisoformat(pr["mergedAt"].replace("Z", "+00:00")).timestamp()
+                if now() - merged > self.cfg["merge_lookback_hours"] * 3600:
+                    return
+            text = (f"fleet watch: PR {url} was merged. Run `ship --act --wait {url}` to follow the deploy. "
+                   f"When it says deployed, report in one line and stop (never run or offer `dev done`); on deploy-failed, investigate and report.")
+        elif state == "CLOSED" and prev == "OPEN":
+            text = (f"fleet watch: PR {url} was closed without merging. Stop work on it and summarise "
+                   f"its state in one line (what's unfinished, whether a successor PR exists).")
+            self.inbox(pane, cwd, "pr-closed", f"{pr['title']} ({url})", pr=url)
+        else:
+            return
+        branch = git_info(cwd)[1]
+        m = {"kind": "pr", "pane": pane, "text": text, "url": url, "state": state, "branch": branch}
+        if status == "working" or self.send(m) is None:
+            s["pending"][pane] = m
+            self.say(f"deferred {pane}: {url} {state}")
+
+
+EVENT_SETTLE_S = 3      # after an event, wait this long for its neighbours before a pass
+MIN_EVENT_GAP_S = 15    # event-triggered passes at most this often; the poll covers the rest
+
+
+def load_cockpit():
+    import importlib.machinery, importlib.util
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "fleet-cockpit")
+    loader = importlib.machinery.SourceFileLoader("fleet_cockpit", path)
+    spec = importlib.util.spec_from_loader("fleet_cockpit", loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    return m
+
+
+class Refresher:
+    """The PR refresh, single-flight and off the watch loop: one runs at a time on its own
+    thread; callers that ask while one runs share its result; one that finished < FRESH_S ago is
+    reused. A hung refresh can't stop merge notices or offer handling."""
+    FRESH_S = 30
+
+    def __init__(self, cockpit, status, log):
+        self.cockpit, self.status, self.log = cockpit, status, log
+        self.lock = threading.Lock()
+        self.running, self.finished, self.error = None, 0.0, None
+        self.rows = None
+
+    def collect(self):
+        self.rows = dict(self.cockpit.collect(), collected_at=iso(now()))
+        return self.rows
+
+    def run(self, wait=True):
+        with self.lock:
+            # one that finished < FRESH_S ago answers, failed ones too: an outage mustn't turn
+            # a client loop into back-to-back refreshes
+            if not self.running and now() - self.finished < self.FRESH_S:
+                if self.error:
+                    if not wait:
+                        return None
+                    raise RuntimeError(f"refresh failed {now() - self.finished:.0f} s ago: {self.error}")
+                if self.rows:
+                    return self.rows
+            done = self.running
+            if not done:
+                done = self.running = threading.Event()
+                threading.Thread(target=self._work, args=(done,), daemon=True, name="refresh").start()
+        if not wait:
+            return None
+        if not done.wait(timeout=900):
+            raise RuntimeError("refresh still running after 15 min")
+        if self.error:
+            raise RuntimeError(f"refresh failed: {self.error}")
+        return self.rows
+
+    def _work(self, done):
+        err = None
+        try:
+            self.cockpit.refresh(quiet=True, inprocess=True)
+            self.status["last_refresh"] = iso(now())
+            self.collect()
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"[:300]
+            self.log(f"refresh failed: {err}")
+        finally:
+            with self.lock:
+                self.error, self.running, self.finished = err, None, now()
+            done.set()
+
+
+def cmd_watch(argv):
+    cfg = config()
+    dry, once = "--dry-run" in argv, "--once" in argv
+    try:
+        interval = int(argv[argv.index("--interval") + 1]) if "--interval" in argv else cfg["interval"]
+    except (IndexError, ValueError):
+        sys.exit("fleet watch: --interval takes a number of seconds, e.g. --interval 120")
+    w = Watch(cfg, dry)
+    last_refresh = last_spares = last_pass = last_prune = 0
+    wake = threading.Event()
+    import fleet_version
+    v = fleet_version.info()
+    # version + commit: doctor spots a watcher still running old code after an update
+    status = {"pid": os.getpid(), "started_at": iso(now()), "last_pass": None, "last_refresh": None,
+              "passes": 0, "event_wakes": 0, "version": v["version"], "commit": v["commit"]}
+    refresher = None
+    if not dry:
+        import fleet_serve
+        try:
+            lock = fleet_serve.single_instance()  # held for the process lifetime, --once included
+        except RuntimeError as e:
+            sys.exit(f"fleet watch: {e}")
+    if not (dry or once):
+        refresher = Refresher(load_cockpit(), status, w.say)
+
+        def on_change(pane, agent_status):
+            status["event_wakes"] += 1
+            wake.set()
+
+        ev = fleet_serve.HerdrEvents(lambda: [a["pane_id"] for a in agents()], on_change, w.say).start()
+
+        def op_rows():
+            return refresher.rows or refresher.collect()
+
+        def op_refresh():
+            return refresher.run(wait=True)
+
+        def op_ping():
+            return dict(status, events=ev.connected, events_seen=ev.events)
+
+        def op_inbox():
+            return [i for i in load_state().get("inbox", []) if i.get("open")]
+
+        def op_events(since):
+            import fleet_events
+            return fleet_events.since(STATE_DIR, since)
+
+        def op_pr(ref):
+            import fleet_pr
+            try:
+                return fleet_pr.detail(op_rows().get("rows", []), ref)
+            except fleet_pr.Refused as e:  # the caller's answer, not a crash
+                raise fleet_serve.OpError(e.code, str(e))
+
+        fleet_serve.serve({"ping": op_ping, "rows": op_rows, "refresh": op_refresh, "inbox": op_inbox,
+                           "events": op_events, "pr": op_pr},
+                          lock=lock)
+    while True:
+        last_pass = now()
+        try:
+            w.tick()
+        except fleet_proc.HerdrDown as e:
+            if once:
+                sys.exit(f"fleet watch --once: herdr unreachable: {e}")
+            w.say(f"herdr unreachable: {e}")
+        except Exception as e:  # a bad poll must not kill the daemon
+            w.say(f"tick failed: {e!r}")
+        status.update(last_pass=iso(now()), passes=status["passes"] + 1)
+        # keep the cockpit's PR data warm: ship's verdict, read-only, for every open PR. In the
+        # background: the next pass doesn't wait for GitHub.
+        if not dry and now() - last_refresh > cfg["refresh_minutes"] * 60:
+            last_refresh = now()
+            if refresher:
+                refresher.run(wait=False)
+            else:
+                subprocess.run(["fleet-cockpit", "ls", "--refresh", "--quiet"], capture_output=True, timeout=600)
+        elif refresher:
+            try:
+                refresher.collect()
+            except Exception as e:
+                w.say(f"collect failed: {e!r}")
+        if not dry and now() - last_prune > 3600:
+            last_prune = now()
+            import fleet_craft
+            fleet_craft.prune(STATE_DIR, cfg.get("craft_keep_days", 14))
+        # keep `fleet new`'s spare worktrees current (each spare locks itself; never blocks the watch)
+        if not dry and now() - last_spares > fleet_config.get("spares", "refresh_minutes", 20) * 60:
+            last_spares = now()
+            subprocess.Popen(["fleet-new", "--spares-refresh"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        if once:
+            return
+        # sleep until the next poll, or until herdr says an agent changed state
+        if wake.wait(timeout=interval):
+            time.sleep(cfg.get("event_settle_s", EVENT_SETTLE_S))
+            time.sleep(max(0, cfg.get("event_min_gap_s", MIN_EVENT_GAP_S) - (now() - last_pass)))
+        wake.clear()
+        w.s = load_state() if not dry else w.s
+
+
+def cmd_inbox(argv):
+    s = load_state()
+    if argv[:1] == ["done"]:
+        # an explicit target only: a bare `inbox done` must not clear the human's whole inbox
+        if len(argv) != 2 or argv[1].startswith("-") and argv[1] != "--all":
+            sys.exit("usage: fleet inbox done <id> | --all")
+        target = "all" if argv[1] == "--all" else argv[1]
+        from fleet_state import update
+
+        def close(disk):  # one locked read-change-write: never drops items the daemon just added
+            for i in disk.get("inbox", []):
+                if i.get("open") and target in ("all", i["id"]):
+                    i["open"], i["resolved"] = False, iso(now())
+        update(STATE, close)
+        return
+    items = [i for i in s["inbox"] if i["open"]]
+    if "--json" in argv:
+        print(json.dumps(items, indent=1))
+        return
+    if not items:
+        print("inbox empty")
+    for i in items:
+        age = int((now() - datetime.fromisoformat(i["ts"].replace("Z", "+00:00")).timestamp()) / 60)
+        where = os.path.basename(i["cwd"]) or i["pane"]
+        text = " ".join(i["text"].split())[:140]
+        print(f"{i['id']}  {age:>4}m  {i['kind']:9} {where:40} {i['pane']:8} {text}")
+
+
+WATCH_FLAGS = ("--once", "--dry-run", "--interval")
+
+
+if __name__ == "__main__":
+    import fleet_term
+    fleet_term.protect_stdout()  # inbox text is agent output: untrusted
+    args = sys.argv[1:]
+    if not args or any(a in ("-h", "--help", "help") for a in args):
+        print(__doc__.strip())
+    elif args[0] == "watch":
+        # only known flags: anything else is a typo or a probe, never a reason to start a watcher
+        rest = args[1:]
+        bad = [a for i, a in enumerate(rest) if a not in WATCH_FLAGS
+               and not (i > 0 and rest[i - 1] == "--interval" and a.isdigit())]
+        if bad:
+            sys.exit(f"fleet watch: unknown argument {bad[0]!r} (flags: {', '.join(WATCH_FLAGS)} S)")
+        cmd_watch(rest)
+    elif args[0] == "inbox":
+        cmd_inbox(args[1:])
+    else:
+        sys.exit(f"fleet-watch: unknown command {args[0]!r}; see fleet-watch --help")
