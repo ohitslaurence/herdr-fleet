@@ -633,7 +633,7 @@ Config:
   alias = folder name; [dev.repos.<alias>] path = "...", base = "main" adds
   or overrides one. `fleet config show dev` prints them.
 
-Labels use repo{LABEL_SEP}task format (e.g. rain{LABEL_SEP}fix-auth); cross contexts use the bare task.
+Labels use repo{LABEL_SEP}task format (e.g. api{LABEL_SEP}fix-auth); cross contexts use the bare task.
 Worktrees live beside the repo as <repo>-wt-<task>; PR reviews as <repo>-wt-pr-<n>.
 Canonical clones are bare (no working tree): all work happens in worktrees.
 'dev done' deletes the branch once it is merged; 'dev prune' reconciles
