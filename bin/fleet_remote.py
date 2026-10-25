@@ -143,7 +143,8 @@ def tool_changes(since=None):
     return untrusted({"since": since, "events": events[-300:]})  # fleet_events stores text already capped
 
 
-PR_REF = re.compile(r"^((?:[\w.-]{1,100}/)?[\w.-]{1,100}#\d{1,7}|https://github\.com/[\w.-]{1,100}/[\w.-]{1,100}/pull/\d{1,7})$")
+PR_REF = re.compile(r"^((?:[\w.-]{1,100}/)?[\w.-]{1,100}#\d{1,7}|https://github\.com/[\w.-]{1,100}/[\w.-]{1,100}/pull/\d{1,7})$",
+                    re.ASCII)  # \w is unicode-wide by default; refs are plain ASCII repo names
 
 
 def tool_pr(ref):

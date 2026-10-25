@@ -261,6 +261,16 @@ class Pr(RemoteCase):
         self.assertEqual(code, 400)
         self.assertIn("isn't a PR in the fleet", out["error"])
 
+    def test_unicode_lookalike_refs_are_refused(self):
+        # PR_REF is ASCII-tight (re.ASCII); the watcher's exact match is the wall either way
+        import fleet_pr
+        rows = [{"kind": "pr", "section": "IN FLIGHT", "where": "api#1", "repo": "o/api",
+                 "number": 1, "url": "https://github.com/o/api/pull/1", "head": "abc"}]
+        for ref in ("аpi#1", "api#１２", "〇/api#1", "o/аpi#1"):  # cyrillic a, fullwidth digits, ...
+            self.assertIsNone(R.PR_REF.match(ref), ref)
+            with self.assertRaises(fleet_pr.Refused, msg=ref):
+                fleet_pr.find(rows, ref)
+
     def test_mcp_schema_requires_ref(self):
         _, tools = self.mcp("tools/list")
         schema = {t["name"]: t["inputSchema"] for t in tools["result"]["tools"]}["fleet_pr"]
@@ -574,6 +584,126 @@ class Scopes(unittest.TestCase):
     def test_empty_scopes_allow_nothing(self):
         with mock.patch.object(fleet_config, "get", lambda s, k, d=None: {} if k == "scopes" else d):
             self.assertEqual(R.allowed_tools(BOT), set())
+
+
+class McpFraming(RemoteCase):
+    """MCP edge cases: a notification must never run a tool, id 0 is a real request."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        self.scopes = {"tag:fleet-client": list(R.TOOLS)}
+        mock.patch.object(R, "serve_call", self._serve).start()  # records, answers ping
+        self.addCleanup(mock.patch.stopall)
+
+    def _serve(self, op, **args):
+        self.calls.append((op, args))
+        return {"version": "x"} if op == "ping" else {"rows": []}
+
+    def test_a_notification_never_executes(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("POST", "/mcp",
+                  json.dumps({"jsonrpc": "2.0", "method": "tools/call",
+                              "params": {"name": "fleet_status", "arguments": {}}}),
+                  {"Host": f"127.0.0.1:{self.port}", "Fleet-Remote": "1",
+                   "Content-Type": "application/json"})
+        r = c.getresponse()
+        r.read()
+        self.assertEqual(r.status, 202)
+        self.assertEqual(self.calls, [], "a notification ran a tool")
+        try:
+            entries = self.audit()
+        except FileNotFoundError:
+            entries = []  # nothing logged at all: right for a notification
+        self.assertFalse(any(a.get("result") == "ok" for a in entries))
+
+    def test_id_zero_is_a_real_request(self):
+        code, out = self.mcp("ping", rid=0)
+        self.assertEqual((code, out.get("id")), (200, 0))
+        self.assertIn("result", out)
+
+    def test_absolute_form_target_is_not_matched(self):
+        code, _ = self.post("http://evil.example/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        self.assertEqual(code, 404)
+
+    def test_arguments_that_arent_an_object_dont_crash(self):
+        code, out = self.mcp("tools/call", {"name": "fleet_pr", "arguments": ["ref", "x"]})
+        self.assertEqual(code, 200)  # an MCP error result, not a 500
+        self.assertTrue(out["result"]["isError"])
+
+
+class RequestShapes(RemoteCase):
+    """HTTP shapes a browser or a confused client produces: refused or answered plainly."""
+
+    def raw(self, data: bytes):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
+            s.sendall(data)
+            s.shutdown(socket.SHUT_WR)
+            out = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    return out
+                out += chunk
+
+    def test_other_verbs_get_a_plain_501_with_no_path_echo(self):
+        for verb in ("PUT", "DELETE", "OPTIONS", "HEAD"):
+            out = self.raw(f"{verb} /v1/fleet_status?secret-marker-123 HTTP/1.1\r\n"
+                           f"Host: 127.0.0.1:{self.port}\r\nFleet-Remote: 1\r\n\r\n".encode())
+            self.assertIn(b"501", out.split(b"\r\n")[0], verb)
+            self.assertNotIn(b"secret-marker-123", out, verb)
+            self.assertNotIn(b"Python", out, verb)
+
+    def test_host_variants_that_arent_exactly_this_listener_are_refused(self):
+        for host in (f"FLEET-HOST:{self.port}", f"fleet-host.:{self.port}",
+                     f"fleet-host:{self.port}:80", f"100.64.0.9.:{self.port}"):
+            code, _ = self.post("/v1/fleet_status", headers={"Host": host})
+            self.assertEqual(code, 403, host)
+
+    def test_duplicate_content_length_reads_the_first_and_closes(self):
+        # no keep-alive (HTTP/1.0): leftover bytes die with the connection, nothing desyncs
+        out = self.raw(f"POST /v1/fleet_status HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+                       f"Fleet-Remote: 1\r\nContent-Length: 2\r\nContent-Length: 16384\r\n\r\n".encode()
+                       + b"{}" + b'{"jsonrpc":"2.0","method":"tools/call","id":9}')
+        self.assertEqual(out.count(b"HTTP/1."), 1, "one request got more than one response")
+
+
+class TagBudget(RemoteCase):
+    def test_the_tag_budget_is_shared_across_nodes_carrying_it(self):
+        # an ephemeral bot re-created with a new node id must not get a fresh budget
+        for _ in range(5):  # RemoteCase's rate_per_min
+            self.assertEqual(self.post("/v1/fleet_status")[0], 200)
+        self.who = {"node": "bot2", "tags": ["tag:fleet-client"], "user": "tagged-devices", "id": "nBOT2"}
+        self.assertEqual(self.post("/v1/fleet_status")[0], 429)
+
+
+class WhoisWindow(RemoteCase):
+    """The real whois cache: a tag removed in the admin console counts within WHOIS_CACHE_S."""
+
+    def test_a_removed_tag_applies_when_the_cache_expires(self):
+        calls = []
+        R._whois_cache.clear()
+        self.addCleanup(R._whois_cache.clear)
+        tagged = {"Node": {"ComputedName": "bot", "Tags": ["tag:fleet-client"], "StableID": "n1"}}
+        untagged = {"Node": {"ComputedName": "bot", "Tags": [], "StableID": "n1"}}
+        state = {"node": tagged}
+        with mock.patch.object(R, "tailscale", lambda *a: calls.append(a) or state["node"]):
+            self.assertEqual(self.real_whois("100.1.1.1", 1)["tags"], ["tag:fleet-client"])
+            state["node"] = untagged
+            # within the window the cached answer still says tagged (documented)
+            self.assertEqual(self.real_whois("100.1.1.1", 2)["tags"], ["tag:fleet-client"])
+            self.assertEqual(len(calls), 1)
+            later = time.monotonic() + R.WHOIS_CACHE_S + 1
+            with mock.patch.object(R.time, "monotonic", lambda: later):
+                self.assertEqual(self.real_whois("100.1.1.1", 3)["tags"], [])
+        self.assertEqual(len(calls), 2)
+
+    def test_whois_failure_is_none_and_never_cached(self):
+        R._whois_cache.clear()
+        self.addCleanup(R._whois_cache.clear)
+        with mock.patch.object(R, "tailscale", lambda *a: None):
+            self.assertIsNone(self.real_whois("100.1.1.1", 1))
+        self.assertEqual(R._whois_cache, {})
 
 
 if __name__ == "__main__":
