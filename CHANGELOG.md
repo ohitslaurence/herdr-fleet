@@ -8,6 +8,12 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: `fleet remote`'s PR ref shape check was Unicode-wide (`\w`); it is ASCII now. Harmless
+  (the watcher matches refs exactly, so a lookalike never fetched), tightened on review.
+- Tests: adversarial edge cases for `fleet remote` (MCP notifications never execute, id 0 is a
+  request, absolute-form targets, duplicate Content-Length, strict Host shapes, per-tag budget
+  shared by ephemeral nodes, the whois cache's stale-tag window closing).
+
 ## v0.4.0 (2026-10-21)
 
 The repository is now public; earlier versions were private.
