@@ -1,7 +1,7 @@
 """dev: registry discovery, context create/reopen, cross, done, prune safety, pr-checkout.
 Run: python3 -m unittest discover -s tests   (no network: herdr, gh and npm are fake
 executables on PATH; repos are temp git repos cloned from local bare "origins")."""
-import importlib.machinery, importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, unittest
+import importlib.machinery, importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -311,6 +311,19 @@ class SingleRepo(DevTestCase):
         self.assertIn("seed: copied 2 file(s)", r.stdout)
         self.assertIn("DEV_SKIP_INSTALL=1", r.stdout)
         self.assertFalse(os.path.exists(self.env["FAKE_NPM_LOG"]))
+
+    def test_create_copies_warm_caches_from_the_newest_sibling(self):
+        self.config(f'[dev]\nrepos_dir = "{self.repos_dir}"\nwarm_caches = [".cache/typecheck"]\n')
+        for name, age in (("old", 100), ("new", 10)):
+            wt = self.p("repos", f"platform-wt-{name}")
+            self.git("-C", self.platform, "worktree", "add", "-q", wt, "-b", f"platform__{name}", "origin/main")
+            info = os.path.join(wt, ".cache", "typecheck", "root.tsbuildinfo")
+            self.write(info, f"{name}\n")
+            os.utime(info, (time.time() - age, time.time() - age))
+        r = self.ok("platform", "fresh")
+        wt = self.platform + "-wt-fresh"
+        self.assertEqual(Path(wt, ".cache", "typecheck", "root.tsbuildinfo").read_text(), "new\n")
+        self.assertIn(f"warm: copied .cache/typecheck from {self.p('repos', 'platform-wt-new')}", r.stdout)
 
     def test_create_runs_lockfile_install(self):
         r = self.ok("platform", "deps", DEV_SKIP_INSTALL="")

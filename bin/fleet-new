@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
 import fleet_proc  # noqa: E402
-from fleet_paths import NO_HOOKS, branch_name, count_worktrees, worktree_path  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, count_worktrees, warm_caches, worktree_path  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
 NOTES = os.path.join(STATE_DIR, "notes.json")
@@ -636,13 +636,14 @@ def build_or_refresh_spare(repo, max_age=20 * 60, wait=False):
                 git("-C", sp, "reset", "-q", "--hard")
             before = lock_hash(sp)
             git("-C", sp, "reset", "-q", "--hard", f"origin/{base}")
+        warmed = warm_caches(sp, replace=True)
         cmd = install_cmd(sp)
         if cmd and (before is None or before != lock_hash(sp) or not os.path.isdir(os.path.join(sp, "node_modules"))):
             p = subprocess.run(cmd, shell=True, cwd=sp, capture_output=True, text=True)
             if p.returncode != 0:
                 spare_meta(alias, ready=False, error=(p.stderr or p.stdout)[-300:])
                 return "install failed"
-        spare_meta(alias, ready=True, lock=lock_hash(sp), error=None)
+        spare_meta(alias, ready=True, lock=lock_hash(sp), error=None, warmed=warmed)
         return "built" if before is None else "refreshed"
 
 
