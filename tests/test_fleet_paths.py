@@ -1,6 +1,7 @@
 """Worktree path and branch templates: defaults are the historical shapes; custom layouts work;
 ownership checks never match spares or review checkouts."""
-import os, re, shutil, subprocess, sys, tempfile, time, unittest
+import io, os, re, shutil, subprocess, sys, tempfile, time, unittest
+from contextlib import redirect_stderr
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bin"))
 import fleet_config  # noqa: E402
@@ -84,7 +85,7 @@ class WarmCaches(unittest.TestCase):
         fleet_config.PATH = cfg
         fleet_config._cache.clear()
         self.addCleanup(lambda: (setattr(fleet_config, "PATH", real), fleet_config._cache.clear()))
-        self.configure('[dev]\nwarm_caches = [".cache/tc", "../out", "/abs"]\n')
+        self.configure('[dev]\nwarm_caches = [".cache/tc"]\n')
 
     def configure(self, text):
         with open(fleet_config.PATH, "w") as f:
@@ -93,6 +94,7 @@ class WarmCaches(unittest.TestCase):
 
     def worktree(self, name, cache=None, age=0):
         wt = os.path.join(self.root, name)
+        os.makedirs(os.path.dirname(wt), exist_ok=True)
         self.run_git("-C", self.repo, "worktree", "add", "-q", wt, "-b", name)
         if cache is not None:
             os.makedirs(os.path.join(wt, ".cache", "tc"))
@@ -112,13 +114,36 @@ class WarmCaches(unittest.TestCase):
         fresh = self.worktree("fresh")
         self.assertEqual(P.warm_caches(fresh), [f".cache/tc from {newest}"])
         self.assertEqual(self.read(fresh), "new")
-        self.assertFalse(os.path.exists(os.path.join(self.root, "out")))
 
     def test_leaves_an_existing_cache_alone(self):
         self.worktree("new", "new")
         mine = self.worktree("mine", "mine", age=100)
         self.assertEqual(P.warm_caches(mine), [])
         self.assertEqual(self.read(mine), "mine")
+
+    def test_entries_outside_the_repo_are_refused_with_a_warning(self):
+        # Siblings at different depths, so "../escape" from one is a real dir and from the other
+        # would be a new one beside it: without the guard this copies a/escape to b/escape.
+        self.configure('[dev]\nwarm_caches = ["../escape"]\n')
+        newer = self.worktree(os.path.join("a", "new"))
+        os.makedirs(os.path.join(newer, "..", "escape"))
+        with open(os.path.join(newer, "..", "escape", "x"), "w") as f:
+            f.write("x")
+        fresh = self.worktree(os.path.join("b", "fresh"))
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(P.warm_caches(fresh), [])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "b", "escape")))
+        self.assertIn("ignoring [dev] warm_caches entry '../escape'", err.getvalue())
+
+    def test_replace_recopies_only_when_a_sibling_wrote_since(self):
+        spare = self.worktree("spare")
+        self.worktree("new", "first", age=100)
+        self.assertEqual(len(P.warm_caches(spare, replace=True)), 1)
+        self.assertEqual(P.warm_caches(spare, replace=True), [])  # nothing newer: keep it
+        newer = self.worktree("newer", "second", age=10)
+        self.assertEqual(P.warm_caches(spare, replace=True), [f".cache/tc from {newer}"])
+        self.assertEqual(self.read(spare), "second")
 
     def test_nothing_configured_or_nothing_to_copy(self):
         fresh = self.worktree("fresh")

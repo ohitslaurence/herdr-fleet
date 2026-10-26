@@ -38,7 +38,7 @@ layers. Per-repo ship overrides go in `[repos.<name>]` with the same keys as `[s
 | `branch.template` | `"{repo}__{task}"` | Branch names, e.g. `"{user}/{task}"`. |
 | `dev.repos_dir` | `""` | The folder your git checkouts live in, e.g. `"~/code"`. Each checkout directly inside is a repo named after its folder. |
 | `dev.repos.<alias>` | none | `path = "..."` (and optionally `base = "main"`): a repo outside `repos_dir`, a different name, or a different base branch. Wins over the scanned one. |
-| `dev.warm_caches` | `[]` | Gitignored build-cache dirs, relative to the repo, that a new worktree (and a `fleet new` spare) copies from whichever other worktree of the repo wrote them last, e.g. `[".cache/typecheck"]`, so its first incremental build or typecheck starts warm instead of cold. A dir the worktree already has is left alone. |
+| `dev.warm_caches` | `[]` | Gitignored build-cache dirs, relative to the repo, that a new worktree copies from whichever other worktree of the repo wrote them last, e.g. `[".cache/typecheck"]`, so its first incremental build or typecheck starts warm instead of cold. A dir the worktree already has is left alone; a `fleet new` spare re-copies on every refresh (what it copied is in its spare state as `warmed`). Entries must be paths inside the repo. |
 | `layout.tabs` | `["shell", "agent"]` | Tabs a new session opens with; `agent` runs the agent. |
 | `setup.installs` | bun, pnpm, yarn, npm | `[lockfile, command]` pairs; the first lockfile found picks the install command. |
 | `spares.repos` | `[]` | Repos that keep one ready worktree, so `fleet new` starts in about a second. Costs a full checkout plus dependencies on disk each. |

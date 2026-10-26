@@ -630,20 +630,20 @@ def build_or_refresh_spare(repo, max_age=20 * 60, wait=False):
             os.makedirs(os.path.dirname(sp), exist_ok=True)
             git(*NO_HOOKS, "-C", repo["path"], "worktree", "add", "-q", "-B", f"fleet-spare/{alias}", sp, f"origin/{base}")
             seed(alias, sp)
-            warm_caches(sp)
             before = None
         else:
             if git("-C", sp, "status", "--porcelain", "--untracked-files=no").strip():
                 git("-C", sp, "reset", "-q", "--hard")
             before = lock_hash(sp)
             git("-C", sp, "reset", "-q", "--hard", f"origin/{base}")
+        warmed = warm_caches(sp, replace=True)
         cmd = install_cmd(sp)
         if cmd and (before is None or before != lock_hash(sp) or not os.path.isdir(os.path.join(sp, "node_modules"))):
             p = subprocess.run(cmd, shell=True, cwd=sp, capture_output=True, text=True)
             if p.returncode != 0:
                 spare_meta(alias, ready=False, error=(p.stderr or p.stdout)[-300:])
                 return "install failed"
-        spare_meta(alias, ready=True, lock=lock_hash(sp), error=None)
+        spare_meta(alias, ready=True, lock=lock_hash(sp), error=None, warmed=warmed)
         return "built" if before is None else "refreshed"
 
 

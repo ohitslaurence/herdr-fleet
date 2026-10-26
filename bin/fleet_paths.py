@@ -115,12 +115,18 @@ def count_worktrees(repo_path, alias):
             return sum(1 for n in os.listdir(os.path.dirname(repo_path.rstrip("/"))) if n.startswith(prefix))
         except OSError:
             return 0
+    return sum(1 for wt in worktrees(repo_path) if dev_owned(wt, repo_path, alias))
+
+
+def worktrees(repo_path):
+    """Every checkout of the repo at repo_path (any of its worktrees will do), from `git worktree
+    list`; [] when git can't say."""
     try:
         out = subprocess.run(["git", "-C", repo_path, "worktree", "list", "--porcelain"], capture_output=True,
                              text=True, timeout=5).stdout
     except (OSError, subprocess.TimeoutExpired):
-        return 0
-    return sum(1 for line in out.splitlines() if line.startswith("worktree ") and dev_owned(line[9:], repo_path, alias))
+        return []
+    return [line[9:] for line in out.splitlines() if line.startswith("worktree ")]
 
 
 def head_branch(cwd):
@@ -163,32 +169,34 @@ def is_linked_worktree(path):
     return p.returncode == 0 and len(lines) == 2 and os.path.realpath(lines[0]) != os.path.realpath(lines[1])
 
 
-def warm_caches(path):
+def warm_caches(path, replace=False):
     """Copy each [dev] warm_caches dir (a gitignored build cache such as a tsc buildinfo) into the
     new checkout at `path` from whichever other worktree of the repo wrote it last, so its first
     build is incremental instead of cold. A cold typecheck can take 5x the memory of a warm one,
     and a fleet starting a dozen at once runs the machine out. The caches validate their own
     inputs, so one from a checkout on other code costs a partial rebuild, never a wrong result.
-    Dirs `path` already has are left alone. Returns "<dir> from <checkout>" per dir copied."""
-    rels = [r for r in fleet_config.get("dev", "warm_caches", [])
-            if r and not os.path.isabs(r) and ".." not in r.split("/")]
+    Dirs `path` already has are left alone, unless `replace` and another worktree has written
+    the dir since: a spare never builds, so it re-copies on every refresh. Copies keep their
+    mtimes, so a copy never looks newer than its source. Returns "<dir> from <checkout>" per copy."""
+    rels = []
+    for r in fleet_config.get("dev", "warm_caches", []):
+        if not r or os.path.isabs(r) or ".." in r.split("/"):
+            print(f"fleet: ignoring [dev] warm_caches entry {r!r}: it must be a path inside the repo",
+                  file=sys.stderr)
+        else:
+            rels.append(r)
     if not rels:
         return []
-    try:
-        out = subprocess.run(["git", "-C", path, "worktree", "list", "--porcelain"], capture_output=True,
-                             text=True, timeout=5).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    others = [line[9:] for line in out.splitlines()
-              if line.startswith("worktree ") and os.path.realpath(line[9:]) != os.path.realpath(path)]
+    others = [o for o in worktrees(path) if os.path.realpath(o) != os.path.realpath(path)]
     copied = []
     for rel in rels:
         dst = os.path.join(path, rel)
-        if os.path.exists(dst):
+        if os.path.exists(dst) and not replace:
             continue
         written, src = max(((_newest_mtime(os.path.join(o, rel)), o) for o in others), default=(0, ""))
-        if not written:
+        if written <= _newest_mtime(dst):
             continue
+        shutil.rmtree(dst, ignore_errors=True)
         try:
             shutil.copytree(os.path.join(src, rel), dst, symlinks=True)
         except (OSError, shutil.Error):
