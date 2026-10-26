@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
 import fleet_proc  # noqa: E402
-from fleet_paths import NO_HOOKS, branch_name, count_worktrees, worktree_path  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, count_worktrees, warm_caches, worktree_path  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
 NOTES = os.path.join(STATE_DIR, "notes.json")
@@ -630,6 +630,7 @@ def build_or_refresh_spare(repo, max_age=20 * 60, wait=False):
             os.makedirs(os.path.dirname(sp), exist_ok=True)
             git(*NO_HOOKS, "-C", repo["path"], "worktree", "add", "-q", "-B", f"fleet-spare/{alias}", sp, f"origin/{base}")
             seed(alias, sp)
+            warm_caches(sp)
             before = None
         else:
             if git("-C", sp, "status", "--porcelain", "--untracked-files=no").strip():

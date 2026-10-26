@@ -106,7 +106,7 @@ DEFAULTS = {
                            ["package-lock.json", "npm ci"]]},
     # repos dev and fleet new know: every git checkout directly in repos_dir (alias = folder
     # name), plus [dev.repos.<alias>] path = "...", base = "main" for others or to override one
-    "dev": {"repos_dir": "", "repos": {}},
+    "dev": {"repos_dir": "", "repos": {}, "warm_caches": []},
     # fleet remote: read-only access for an agent on your tailnet (docs/remote.md). scopes:
     # "tag:<name>" = ["fleet_status", "fleet_overview", "fleet_inbox"]; empty refuses everyone
     "remote": {"port": 7412, "rate_per_min": 30, "scopes": {}},

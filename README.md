@@ -198,6 +198,7 @@ orgs = ["acme"]                   # owner for bare `repo#n`, scope for PR search
 
 [dev]
 repos_dir = "~/code"              # your git checkouts; each folder inside is a repo
+warm_caches = [".cache/typecheck"]  # build caches a new worktree copies from the newest sibling
 
 [dev.repos.infra]                 # one that lives elsewhere, or a different base branch
 path = "~/work/infrastructure"

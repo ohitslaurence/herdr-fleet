@@ -15,7 +15,7 @@ import json, os, re, shlex, shutil, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 # Worktree paths and branch names come from templates (~/.config/fleet/config.toml); the
 # defaults are the historical <repo-path>-wt-<task> and <repo>__<task>.
-from fleet_paths import NO_HOOKS, branch_name, branch_task, dev_owned, pr_worktree_path  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, branch_task, dev_owned, pr_worktree_path, warm_caches  # noqa: E402
 from fleet_paths import worktree_path as worktree_path_of  # noqa: E402
 from dataclasses import dataclass
 from typing import NamedTuple, NoReturn
@@ -543,6 +543,8 @@ def seed_worktree(alias: str, worktree_path: str) -> int:
 def bootstrap_worktree(worktree_path: str, alias: str = ""):
     resolved = resolve(worktree_path)
     seed_worktree(alias, resolved)
+    for copied in warm_caches(resolved):
+        print(f"warm: copied {copied}")
 
     if os.path.exists(os.path.join(resolved, ".par.yaml")):
         print(f"bootstrap: {resolved} has .par.yaml, skipping generic bootstrap")
@@ -626,6 +628,8 @@ Usage:
 Config:
   Seed files: ~/.config/dev/seed/<alias>/ mirrors the repo; its files are copied
   into every new worktree (for .env and other gitignored local config).
+  [dev] warm_caches dirs (e.g. ".cache/typecheck") are copied into a new
+  worktree from the sibling that wrote them last, so its first build is warm.
   DEV_NO_FOCUS=1 creates contexts without focusing them (orchestration).
   DEV_SKIP_INSTALL=1 seeds but skips the lockfile install (fleet new runs it in the shell tab).
 

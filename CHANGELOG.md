@@ -8,6 +8,10 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- New setting `[dev] warm_caches`: gitignored build-cache dirs (e.g. `[".cache/typecheck"]`)
+  that `dev` and `fleet new`'s spares copy into a new worktree from the sibling that wrote them
+  last. A cold typecheck can take 5x the memory of a warm one; a fleet starting a dozen cold at
+  once ran a 32 GB machine out of memory.
 - Fix: `fleet remote`'s PR ref shape check was Unicode-wide (`\w`); it is ASCII now. Harmless
   (the watcher matches refs exactly, so a lookalike never fetched), tightened on review.
 - Tests: adversarial edge cases for `fleet remote` (MCP notifications never execute, id 0 is a
