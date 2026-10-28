@@ -39,6 +39,11 @@ def thread(level, replies=0, reply_at=None, resolved=False):
             "last": {"nodes": [{"createdAt": reply_at or ago(1), "author": {"login": "octocat"}}]}}
 
 
+def check(status, conclusion):
+    return {"__typename": "CheckRun", "name": "ci", "status": status, "conclusion": conclusion, "startedAt": ago(2),
+            "detailsUrl": "", "checkSuite": {"workflowRun": {"databaseId": 1, "workflow": {"name": "CI"}}}}
+
+
 def pr(checks=None, threads=(), comments=(), checks_more=False, threads_more=False, commit_at=None, created=None):
     green = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": ago(20),
               "detailsUrl": "", "checkSuite": {"workflowRun": {"databaseId": 1, "workflow": {"name": "CI"}}}}]
@@ -69,15 +74,46 @@ class Gates(unittest.TestCase):
         S.pr_files = lambda o, r, n, p: [f["path"] for f in p["files"]["nodes"]]
 
     def ev(self, p):
-        self.S.fetch = lambda o, r, n: p
-        s, _, _ = self.S.evaluate("o", "r", 1)
+        s = self.state(p)
         return s["state"], s["next"]
+
+    def state(self, p):
+        self.S.fetch = lambda o, r, n: p
+        return self.S.evaluate("o", "r", 1)[0]
 
     def clean(self, **kw):
         return pr(comments=[greptile_summary(HEAD, 5, ago(10))], **kw)
 
     def test_clean_pr_awaits_human(self):
         self.assertEqual(self.ev(self.clean())[0], "awaiting-human")
+
+    def test_draft_is_marked_ready_before_the_review_bot_is_asked(self):
+        # Greptile skips drafts in some repos: asking it on a draft waits on silence
+        s = self.state(dict(pr(), isDraft=True))
+        self.assertEqual((s["state"], s["act"]), ("draft-clean", "ready"))
+
+    def test_draft_is_marked_ready_while_ci_runs(self):
+        s = self.state(dict(pr(checks=[check("IN_PROGRESS", None)]), isDraft=True))
+        self.assertEqual((s["state"], s["act"]), ("draft-clean", "ready"))
+
+    def test_draft_tagged_into_silence_is_marked_ready_not_handed_to_a_human(self):
+        tag = {"url": "u-t", "author": {"login": "octocat"}, "createdAt": ago(90), "updatedAt": ago(90),
+               "body": "@greptileai review"}
+        s = self.state(dict(pr(comments=[tag]), isDraft=True))
+        self.assertEqual((s["state"], s["act"]), ("draft-clean", "ready"))
+        self.assertNotIn("stuck", s)
+        self.assertEqual(self.ev(pr(comments=[tag]))[0], "needs-human", "a ready PR's silence still goes to a human")
+
+    def test_draft_with_open_finding_shows_the_finding(self):
+        p = dict(pr(threads=[thread("P1")], comments=[greptile_summary(HEAD, 3, ago(10))]), isDraft=True)
+        self.assertEqual(self.ev(p)[0], "review-findings")
+
+    def test_draft_with_red_ci_fixes_ci_first(self):
+        self.assertEqual(self.ev(dict(pr(checks=[check("COMPLETED", "FAILURE")]), isDraft=True))[0], "ci-red")
+
+    def test_draft_without_a_review_bot_waits_for_ci_before_ready(self):
+        self.S.load_policy = lambda r, *a: dict(POLICY, require_selfreview=False, review="none")
+        self.assertEqual(self.ev(dict(pr(checks=[check("IN_PROGRESS", None)]), isDraft=True))[0], "ci-running")
 
     def test_truncated_checks_fail_closed(self):
         self.assertEqual(self.ev(self.clean(checks_more=True))[0], "needs-human")

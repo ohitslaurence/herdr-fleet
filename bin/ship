@@ -582,6 +582,12 @@ def decide(f, now):
     # Review runs alongside CI: findings to fix, a self-review to write, or a review to
     # request don't need to wait for green. Only the merge decision does.
     got = review_state(f, now, pol, s, hfiles, out, ci["all_pending"])
+    # Review bots may skip drafts (Greptile does in some repos): never wait on one, or ask one, on a draft.
+    g = s.get("review")
+    if pr["isDraft"] and g and got and (got[0]["act"] == "retag" or got[0]["state"] == "review-pending"
+                                        or g["retag_unanswered"]):
+        s.pop("stuck", None)
+        return out("draft-clean", f"mark ready so {R.provider(pol['review']).title} reviews it: `ship --act`", act="ready")
     if got:
         return got
     if pending:
