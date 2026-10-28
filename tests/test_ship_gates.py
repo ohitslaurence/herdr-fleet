@@ -39,14 +39,13 @@ def thread(level, replies=0, reply_at=None, resolved=False):
             "last": {"nodes": [{"createdAt": reply_at or ago(1), "author": {"login": "octocat"}}]}}
 
 
-def check(status, conclusion):
-    return {"__typename": "CheckRun", "name": "ci", "status": status, "conclusion": conclusion, "startedAt": ago(2),
+def check(status, conclusion, started=2):
+    return {"__typename": "CheckRun", "name": "ci", "status": status, "conclusion": conclusion, "startedAt": ago(started),
             "detailsUrl": "", "checkSuite": {"workflowRun": {"databaseId": 1, "workflow": {"name": "CI"}}}}
 
 
 def pr(checks=None, threads=(), comments=(), checks_more=False, threads_more=False, commit_at=None, created=None):
-    green = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": ago(20),
-              "detailsUrl": "", "checkSuite": {"workflowRun": {"databaseId": 1, "workflow": {"name": "CI"}}}}]
+    green = [check("COMPLETED", "SUCCESS", started=20)]
     return {"number": 1, "url": "https://github.com/o/r/pull/1", "title": "t", "state": "OPEN", "isDraft": False,
             "merged": False, "mergedAt": None, "createdAt": created or ago(120), "mergeCommit": None,
             "headRefName": "b", "headRefOid": HEAD, "baseRefName": "main", "mergeable": "MERGEABLE",
@@ -107,6 +106,13 @@ class Gates(unittest.TestCase):
     def test_draft_with_open_finding_shows_the_finding(self):
         p = dict(pr(threads=[thread("P1")], comments=[greptile_summary(HEAD, 3, ago(10))]), isDraft=True)
         self.assertEqual(self.ev(p)[0], "review-findings")
+
+    def test_draft_needing_a_rereview_is_marked_ready(self):
+        self.S.lines_since = lambda *a: 999
+        p = dict(pr(comments=[greptile_summary("b" * 40, 5, ago(60))]), isDraft=True)
+        s = self.state(p)
+        self.assertEqual((s["state"], s["act"]), ("draft-clean", "ready"))
+        self.assertEqual(self.ev(dict(p, isDraft=False))[0], "review-stale")
 
     def test_draft_with_red_ci_fixes_ci_first(self):
         self.assertEqual(self.ev(dict(pr(checks=[check("COMPLETED", "FAILURE")]), isDraft=True))[0], "ci-red")

@@ -9,9 +9,10 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 ## Unreleased
 
 - Fix: ship asked the review bot on draft PRs, and Greptile skips drafts in some repos, so the PR
-  waited on silence and then went to a human. Now, when ship would wait on the bot or tag it on a
-  draft (including a tag that went unanswered), it marks the PR ready instead; open findings and
-  red CI still come first.
+  waited on silence and then went to a human. Now, on a draft, wherever ship would wait on the bot
+  or tag it (first review, a re-review after answered P0/P1s or a big change, or after a tag that
+  went unanswered), it marks the PR ready instead, even while CI runs; open findings, red CI and
+  craft findings still come first. Repos without a review bot still mark ready after CI.
 - New setting `[dev] warm_caches`: gitignored build-cache dirs (e.g. `[".cache/typecheck"]`)
   that `dev` copies into a new worktree from the sibling that wrote them last (`fleet new`'s
   spares re-copy on every refresh). A cold typecheck can take 5x the memory of a warm one; a fleet starting a dozen cold at

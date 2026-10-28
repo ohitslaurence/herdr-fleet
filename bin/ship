@@ -582,12 +582,6 @@ def decide(f, now):
     # Review runs alongside CI: findings to fix, a self-review to write, or a review to
     # request don't need to wait for green. Only the merge decision does.
     got = review_state(f, now, pol, s, hfiles, out, ci["all_pending"])
-    # Review bots may skip drafts (Greptile does in some repos): never wait on one, or ask one, on a draft.
-    g = s.get("review")
-    if pr["isDraft"] and g and got and (got[0]["act"] == "retag" or got[0]["state"] == "review-pending"
-                                        or g["retag_unanswered"]):
-        s.pop("stuck", None)
-        return out("draft-clean", f"mark ready so {R.provider(pol['review']).title} reviews it: `ship --act`", act="ready")
     if got:
         return got
     if pending:
@@ -740,9 +734,16 @@ def review_state(f, now, pol, s, hfiles, out, pending):
             return out(state, msg, stuck=stuck_report(kind, pr, g, threads, s, tier, P, pol), **kw)
         good_score = (g["score"] or 0) >= tier["min_score"]
 
+        def ask_bot(state, msg, act=None):
+            """Wait on the bot or ask it. Bots may skip drafts (Greptile does in some repos), so a
+            draft is marked ready instead: on a draft this would wait on silence."""
+            if pr["isDraft"]:
+                return out("draft-clean", f"mark ready so {P.title} reviews it: `ship --act`", act="ready")
+            return out(state, msg, act=act)
+
         if g["retag_pending"]:
-            return out("review-pending", f"wait: `ship --wait` ({P.title} is reviewing)")
-        if g["retag_unanswered"]:
+            return ask_bot("review-pending", f"wait: `ship --wait` ({P.title} is reviewing)")
+        if g["retag_unanswered"] and not pr["isDraft"]:  # a draft is marked ready below instead
             # Fail closed: silence is not a pass (outage, rate limit, not installed, PR too big),
             # and re-tagging into silence just pays again.
             return stuck("needs-human", f"{P.title} didn't answer the last review request within {review_timeout} min. "
@@ -752,8 +753,8 @@ def review_state(f, now, pol, s, hfiles, out, pending):
             ready = [x["createdAt"] for x in (pr.get("timelineItems") or {}).get("nodes", []) if x]
             if age_minutes((ready or [pr["createdAt"]])[-1], now) < pol.get("review_first_grace_min",
                                                                           P.first_review_grace_min):
-                return out("review-pending", f"wait: `ship --wait` ({P.title} reviews new PRs on its own)")
-            return out("review-stale", f"request {P.title}'s first review: `ship --act`", act="retag")
+                return ask_bot("review-pending", f"wait: `ship --wait` ({P.title} reviews new PRs on its own)")
+            return ask_bot("review-stale", f"request {P.title}'s first review: `ship --act`", act="retag")
         # A reply to a P0/P1 is a claim, not a fix: only a bot review after the reply clears it.
         unverified = [a for a in answered if not g["verdict_at"] or a > g["verdict_at"]]
         if unverified and not blocking:
@@ -763,7 +764,7 @@ def review_state(f, now, pol, s, hfiles, out, pending):
             if pol["require_selfreview"] and not selfreview_of(f):
                 return out("self-review", f"{len(unverified)} answered P0/P1 finding(s) need a re-review to confirm: do the "
                                           "self-review (`ship guide self-review`), post it, then `ship --act --wait`")
-            return out("review-stale", f"{len(unverified)} P0/P1 finding(s) answered since {P.title}'s last review: a "
+            return ask_bot("review-stale", f"{len(unverified)} P0/P1 finding(s) answered since {P.title}'s last review: a "
                                        f"re-review must confirm them; {rereviews_left} left: `ship --act --wait`", act="retag")
         if blocking or minor:
             kind = "P0/P1" if blocking else "minor"
@@ -811,7 +812,7 @@ def review_state(f, now, pol, s, hfiles, out, pending):
                 if pol["require_selfreview"] and not selfreview_of(f):
                     return out("self-review", f"before paying for a re-review ({why}): do the self-review "
                                               "(`ship guide self-review`) and post it as a PR comment, then `ship --act --wait`")
-                return out("review-stale", f"re-review needed ({why}); {rereviews_left} left: `ship --act --wait`", act="retag")
+                return ask_bot("review-stale", f"re-review needed ({why}); {rereviews_left} left: `ship --act --wait`", act="retag")
         elif not good_score:
             if rereviews_left <= 0:
                 return stuck("needs-human", f"{P.title} {g['score']}/5 < {tier['min_score']} with no findings left and "
