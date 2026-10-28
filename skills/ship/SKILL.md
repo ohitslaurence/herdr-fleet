@@ -13,10 +13,11 @@ that action, then ask `ship` again. The loop ends only at a terminal state.
 
 1. No PR yet: commit, push and open it as a draft. With gritty: `gritty commit --accept`,
    `gritty pr --accept --draft`. Without: `git commit`, `gh pr create --fill --draft`.
-   ship marks it ready once it's clean, so paid reviewers only see the finished work.
+   ship marks it ready once CI isn't red and the craft review (if on) is settled, before
+   asking the review bot: bots may skip drafts. Don't tag a bot on a draft yourself.
 2. Run `ship --act --wait` (add the PR URL if you are not on its branch).
    `--act` does the mechanical steps itself: request a Greptile review when the
-   budget allows, re-run cancelled CI, update a behind branch, mark ready,
+   budget allows (marking a draft ready instead), re-run cancelled CI, update a behind branch, mark ready,
    label, and merge when policy allows. `--wait` blocks while CI runs, Greptile
    reviews, or the deploy rolls out, so you don't poll.
    If the user says they merged it, or asks whether it's open, merged or deployed:
