@@ -12,7 +12,7 @@
 #               --workspace (or no HERDR_WORKSPACE_ID) gives it its own dev workspace instead
 #   orch prompt <name> "<text>"        steer a running worker (no wait)
 #   orch [--json] status                one line per worker, or one JSON object
-#   orch wait   [name...] [--all] [--timeout S]
+#   orch wait   [name...] [--all] [--timeout S]   (default 540, ship's --wait; 0: no limit)
 #               block until a worker reaches a terminal status you haven't been shown, print it and
 #               return, so you can read its report while the rest work (--all: until every worker is
 #               terminal). No names: the workers this pane started. Exit 2 "quiet: idle Nm with no
@@ -231,7 +231,7 @@ cmd_status() {
 }
 
 cmd_wait() {
-  local timeout=0 all=0; local -a names=()
+  local timeout=540 all=0; local -a names=()
   while [[ $# -gt 0 ]]; do
     case "$1" in --timeout) timeout="$2"; shift 2;; --all) all=1; shift;; *) names+=("$1"); shift;; esac
   done

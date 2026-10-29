@@ -10,7 +10,7 @@
       --act   also perform the mechanical next step (ask the review bot, mark ready,
               merge when policy allows, label). Code changes stay with the agent.
       --wait  poll until the PR leaves a waiting state (CI running, review
-              pending, deploying) or SECS pass (default 1800), then print.
+              pending, deploying) or SECS pass (default 540), then print.
   ship pr [<ref>...]    instant facts: open/merged/closed, when, by whom, CI, mergeability.
                        <ref>: URL, repo#n, owner/repo#n, number, or search text (title/branch).
                        Run this before telling anyone a PR is open, merged, or needs merging.
@@ -49,6 +49,9 @@ RESCUE_MARK = re.compile(r"<!-- fleet-rescue sha=([0-9a-f]{7,40}) -->")
 SELF_MARK = re.compile(r"<!-- fleet-self-review sha=([0-9a-f]{7,40}) -->")
 REVIEW_MARK = re.compile(r"<!-- fleet-review sha=([0-9a-f]{7,40}) verdict=(clean|findings) -->")
 WAITING = {"ci-running", "review-pending", "deploying", "cross-reviewing"}
+# Under Claude Code's 10-minute Bash cap, so a foreground `ship --act --wait` returns instead of
+# being backgrounded mid-wait. Agents loop on `next:` anyway, so a shorter wait costs nothing.
+WAIT_DEFAULT_S = 540
 AFTER_DEPLOY_TIMEOUT_S = 600
 AFTER_DEPLOY_TAIL = 300  # characters of a failed run's output kept in the ledger
 TERMINAL = {"churn", "deployed", "awaiting-human", "needs-human", "closed", "deploy-failed", "deploy-gated"}
@@ -1046,9 +1049,9 @@ def cmd_status(argv):
     ap.add_argument("pr", nargs="?")
     ap.add_argument("--act", action="store_true")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--wait", nargs="?", type=int, const=1800)
+    ap.add_argument("--wait", nargs="?", type=int, const=WAIT_DEFAULT_S)
     # `--wait` takes an optional number of seconds; don't let it swallow a PR URL after it
-    argv = [("--wait=1800" if x == "--wait" and not (i + 1 < len(argv) and argv[i + 1].isdigit()) else x)
+    argv = [(f"--wait={WAIT_DEFAULT_S}" if x == "--wait" and not (i + 1 < len(argv) and argv[i + 1].isdigit()) else x)
             for i, x in enumerate(argv)]
     a = ap.parse_args(argv)
     do_act, as_json, wait = a.act, a.json, a.wait

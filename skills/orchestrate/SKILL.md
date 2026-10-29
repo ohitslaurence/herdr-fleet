@@ -46,13 +46,13 @@ checks off, whatever `agents.permissions` says: nobody is there to answer a prom
    One worker per independent item. Names: `[a-z][a-z0-9_-]*`, unique. Inside herdr, each worker becomes a tab of your workspace; add `--workspace` for separate workspaces.
    Exit 1 "needs a human": relay the pane and the line to the user; do not
    answer the dialog yourself.
-4. **Wait.** `orch wait --timeout 1800`. It returns as soon as one of your
+4. **Wait.** `orch wait`. It returns as soon as one of your
    workers finishes (done, failed, blocked, needs-decision) and prints its
    line: read that worker's report, act on it, then `orch wait` again until it
-   says `all terminal`. Run it in the foreground: a background wait is output
-   nobody reads. Claude Code's Bash tool stops a foreground command at its
-   `timeout` (2 min unless you set one, 10 max): there, run
-   `orch wait --timeout 540` with the Bash timeout at 600000. If you end your turn while workers run, `fleet watch` prompts
+   says `all terminal`; after 9 minutes it returns `timeout; … still running`:
+   wait again. Run it in the foreground: a background wait is output
+   nobody reads. In Claude Code give the Bash call a 600000 ms timeout (the
+   2-minute default backgrounds it mid-wait). If you end your turn while workers run, `fleet watch` prompts
    you when one finishes. Between waits do nothing else; the workers are the
    work. `quiet: idle Nm with no status` means the worker stopped without
    saying why (a refused brief, a lost prompt): read the log.
