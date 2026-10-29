@@ -50,7 +50,9 @@ checks off, whatever `agents.permissions` says: nobody is there to answer a prom
    workers finishes (done, failed, blocked, needs-decision) and prints its
    line: read that worker's report, act on it, then `orch wait` again until it
    says `all terminal`. Run it in the foreground: a background wait is output
-   nobody reads. If you end your turn while workers run, `fleet watch` prompts
+   nobody reads. Claude Code's Bash tool stops a foreground command at its
+   `timeout` (2 min unless you set one, 10 max): there, run
+   `orch wait --timeout 540` with the Bash timeout at 600000. If you end your turn while workers run, `fleet watch` prompts
    you when one finishes. Between waits do nothing else; the workers are the
    work. `quiet: idle Nm with no status` means the worker stopped without
    saying why (a refused brief, a lost prompt): read the log.
