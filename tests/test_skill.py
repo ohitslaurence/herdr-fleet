@@ -35,6 +35,19 @@ class Drift(unittest.TestCase):
                 with self.subTest(skill=name, tool=tool):
                     self.assertEqual(set(re.findall(rf"`{tool} (\w[\w-]*)", text)) - offered(tool), set())
 
+    def test_waits_fit_under_claude_codes_bash_cap(self):
+        # Claude Code's Bash tool caps a foreground command at 600000 ms; past it the wait is
+        # backgrounded and the agent loses the `next:` line. The skills quote both numbers.
+        ship_wait = int(re.search(r"^WAIT_DEFAULT_S = (\d+)", Path(BIN, "ship").read_text(), re.M)[1])
+        orch_wait = int(re.search(r"local timeout=(\d+)", Path(BIN, "orch").read_text())[1])
+        self.assertEqual(orch_wait, ship_wait)
+        self.assertLess(ship_wait * 1000, 600000)
+        for name in ("ship", "orchestrate"):
+            with self.subTest(skill=name):
+                self.assertIn(f"within {ship_wait // 60} minutes" if name == "ship" else f"after {ship_wait // 60} minutes",
+                              skill_text(name))
+                self.assertIn("600000 ms", skill_text(name))
+
     def test_every_fleet_subcommand_is_in_the_skill(self):
         text = skill_text()
         missing = {s for s in offered("fleet") if f"fleet {s}" not in text}

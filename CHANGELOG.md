@@ -8,6 +8,10 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: `ship --wait` and `orch wait` default to 540 s (were 1800 s and no limit), under Claude
+  Code's 10-minute Bash cap. Past it, Claude Code backgrounded the wait. The ship and
+  orchestrate skills tell Claude Code agents to give those calls a 600000 ms Bash timeout,
+  and not to pipe `ship` through `tail`.
 - Fix: ship asked the review bot on draft PRs, and Greptile skips drafts in some repos, so the PR
   waited on silence and then went to a human. Now, on a draft, wherever ship would wait on the bot
   or tag it (first review, a re-review after answered P0/P1s or a big change, or after a tag that

@@ -20,6 +20,9 @@ that action, then ask `ship` again. The loop ends only at a terminal state.
    budget allows (marking a draft ready instead), re-run cancelled CI, update a behind branch, mark ready,
    label, and merge when policy allows. `--wait` blocks while CI runs, Greptile
    reviews, or the deploy rolls out, so you don't poll.
+   `--wait` returns within 9 minutes. In Claude Code give the Bash call a 600000 ms
+   timeout (the 2-minute default backgrounds it mid-wait), and don't pipe it through
+   `tail`: a cut-off pipe loses the `next:` line.
    If the user says they merged it, or asks whether it's open, merged or deployed:
    run `ship pr <ref>` (about 1 s, read-only) and answer from that. Use `--wait` only
    when it shows a deploy still running.
