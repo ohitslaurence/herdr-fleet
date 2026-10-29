@@ -52,8 +52,8 @@ checks off, whatever `agents.permissions` says: nobody is there to answer a prom
    says `all terminal`; after 9 minutes it returns `timeout; … still running`:
    wait again. Run it in the foreground: a background wait is output
    nobody reads. In Claude Code give the Bash call a 600000 ms timeout (the
-   2-minute default backgrounds it mid-wait). If you end your turn while workers run, `fleet watch` prompts
-   you when one finishes. Between waits do nothing else; the workers are the
+   2-minute default backgrounds it mid-wait). If you end your turn while
+   workers run, `fleet watch` prompts you when one finishes. Between waits do nothing else; the workers are the
    work. `quiet: idle Nm with no status` means the worker stopped without
    saying why (a refused brief, a lost prompt): read the log.
    `[w] done, but its worktree: 2 uncommitted changes, 1 commit not pushed`
