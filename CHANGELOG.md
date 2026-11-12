@@ -8,6 +8,11 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- New: fleet watch nudges an idle orchestrator once when every worker it still waits on has been idle
+  `orch.quiet_min` minutes (5) without a status line (or its pane is gone): "check them, don't wait".
+  Before, only a worker's terminal status line woke it, so workers that stopped silently left it idle.
+- New: when the watcher isn't running, `orch start` and `orch wait` say so (nothing will prompt the
+  orchestrator), and the cockpit's top line reads WATCHER STOPPED. It had been down for days unnoticed.
 - Fix: opencode v2 dropped `--model` from its interactive screen, so `orch` and `fleet new` couldn't
   start an opencode agent given a model. They now start it without one, and it runs the model set in
   opencode's own config (`kinds.opencode.model_flag` is `""`); asking for another model prints a note.

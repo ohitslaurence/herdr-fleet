@@ -495,6 +495,21 @@ class Watch:
             if not self.dry:
                 for name, _, line in workers:
                     fleet_orch.mark_notified(home, name, line)
+        # Workers that stopped without a status line: nobody else will tell an idle orchestrator.
+        quiet_min = fleet_config.get("orch", "quiet_min", 5)
+        if not quiet_min:
+            return
+        for pane, workers in fleet_orch.quiet(home, by_pane, quiet_min, now()).items():
+            a = by_pane.get(pane)
+            if not a or a.get("agent_status") not in ("idle", "done"):
+                continue
+            names = ", ".join(name for name, _ in workers)
+            self.prompt(pane, f"orch: {names} {'has' if len(workers) == 1 else 'have'} been idle {quiet_min}+ min with no "
+                              "status line, and none of your workers is busy. Check them now (`orch status`, "
+                              "`orch log <name>`) rather than waiting; `orch done <name>` for any that are finished.")
+            if not self.dry:
+                for name, line in workers:
+                    fleet_orch.mark_nudged(home, name, line)
 
     def pr_event(self, pane, cwd, status, pr):
         s, url, state = self.s, pr["url"], pr["state"]
