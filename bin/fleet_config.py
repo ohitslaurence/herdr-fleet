@@ -132,7 +132,9 @@ DEFAULTS = {
                    "models": ["fable", "opus", "sonnet", "haiku"]},  # aliases `claude --model` documents
         "codex": {"cmd": ["codex"], "bypass": ["--dangerously-bypass-approvals-and-sandbox"],
                   "model_flag": "--model", "about": "Codex CLI", "names": ["codex"]},
-        "opencode": {"cmd": ["opencode"], "bypass": ["--auto"], "model_flag": "--model",
+        # opencode v2's interactive screen takes no --model (only `opencode run -m`): it runs the
+        # model set in opencode's own config. model_flag "" = the harness can't pick one at launch.
+        "opencode": {"cmd": ["opencode"], "bypass": ["--auto"], "model_flag": "",
                      "about": "opencode (runs models from many providers)", "names": ["opencode"],
                      "models_cmd": ["opencode", "models"]},
     },

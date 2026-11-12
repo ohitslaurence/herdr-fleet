@@ -3,7 +3,7 @@
 # supervise them through an append-only status log.
 #
 #   orch start  <name> --repo <alias> --brief <file> [--role R] [--kind codex|claude|opencode] [--model M|<nickname>] [--effort low|medium|high|xhigh] [--workspace]
-#               opencode: --model provider/model (e.g. opencode/kimi-k3); effort doesn't apply
+#               opencode: runs the model in its own config (v2 has no --model); effort doesn't apply
 #               kind/model/effort default to `fleet role <R>` ([roles] in the fleet config; R defaults
 #               to worker; `--role security` for briefs Codex's cyber filter refuses)
 #               exit 1 "needs a human" when the agent shows a dialog orch won't answer (login, mode
@@ -164,9 +164,10 @@ PY
       [[ -n "$effort" ]] && args+=(--effort "$effort")
       [[ -n "$model" ]] && args+=(--model "$model") ;;
     opencode)
-      # --auto: approve tool calls not explicitly denied (opencode's skip-permissions)
+      # --auto: approve tool calls not explicitly denied (opencode's skip-permissions).
+      # v2's interactive screen takes no --model: it runs the model in opencode's own config.
       args=(--auto)
-      [[ -n "$model" ]] && args+=(--model "$model") ;;
+      [[ -n "$model" ]] && echo "orch: opencode can't pick a model per worker; it runs the one in its own config, not $model" >&2 ;;
     *) die "kind must be codex, claude or opencode";;
   esac
   # Record the worker before anything else can fail, so `orch status/done` can clean up a bad start.

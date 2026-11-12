@@ -1,8 +1,10 @@
 """fleet_skills — install the fleet skills into each agent harness, as stamped copies.
 
   fleet skills status [--json]          which harnesses have them, at which version
-  fleet skills install [--to a,b] [--yes]   copy skills/fleet and skills/orchestrate into each
-                                            harness's skills folder
+  fleet skills install [--to a,b] [--yes]   copy every skill under SKILLS into each harness's
+                                            skills folder
+  fleet skills refresh                  re-copy the installed ones from this checkout (fleet update and
+                                        an install that follows main both run it)
 
 `fleet` is the one every agent needs; `orchestrate` is for an agent driving workers with orch.
 
@@ -137,15 +139,17 @@ def refresh():
     for dest in recorded:
         if installed_version(dest) is not None:
             copy_to(os.path.basename(dest), dest)
-    # Installs from v0.3.0 and earlier have no orchestrate skill (the fleet skill held it): add it
-    # beside each fleet copy, over a link left pointing at the old folder. Delete with v0.3 installs.
+    # A skill added in a later release goes beside each fleet copy (over a link left pointing at an
+    # old folder), so an update brings new skills, not only new versions of the old ones.
     added = []
     for dest in recorded:
-        sibling = os.path.join(os.path.dirname(dest), "orchestrate")
-        if os.path.basename(dest) != "fleet" or sibling in recorded or installed_version(dest) is None:
+        if os.path.basename(dest) != "fleet" or installed_version(dest) is None:
             continue
-        if os.path.islink(sibling) or not os.path.exists(sibling):
-            copy_to("orchestrate", sibling)
+        for name in SKILLS:
+            sibling = os.path.join(os.path.dirname(dest), name)
+            if sibling in recorded or (os.path.exists(sibling) and not os.path.islink(sibling)):
+                continue
+            copy_to(name, sibling)
             added.append(sibling)
     if added:
         fleet_manifest.update(lambda m: m["skills"].extend(d for d in added if d not in m["skills"]))
@@ -178,5 +182,9 @@ def main(argv):
                       file=sys.stderr)
                 return 2
         return install(to, yes)
+    if cmd == "refresh" and not rest:
+        refresh()
+        print(f"fleet skills: installed copies now {stamp()}")
+        return 0
     print(f"fleet skills: unknown command {cmd!r}; see fleet skills --help", file=sys.stderr)
     return 2

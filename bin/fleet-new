@@ -66,8 +66,12 @@ def agent_argv(kind, model=None):
     spec = fleet_config.agent_kinds()[kind]
     model = model or default_model(kind)
     argv = list(spec["cmd"])
-    if model:
-        argv += [spec.get("model_flag", "--model"), model]
+    flag = spec.get("model_flag", "--model")
+    if model and flag:
+        argv += [flag, model]
+    elif model:
+        print(f"fleet new: {kind} can't pick a model at launch; it runs the one in its own config, not {model}",
+              file=sys.stderr)
     if fleet_config.get("agents", "permissions", "ask") == "bypass":
         argv += list(spec.get("bypass", []))
     return argv

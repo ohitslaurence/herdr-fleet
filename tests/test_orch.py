@@ -291,10 +291,12 @@ class StartAndWait(unittest.TestCase):
         with open(os.path.join(self.home, ".config", "fleet", "config.toml"), "w") as f:
             f.write('[models.kimi]\nharness = "opencode"\nmodel = "opencode/kimi-k3"\n')
         self.screens("Loading…\n")
-        self.orch("start", "w1", "--repo", "api", "--brief", os.path.join(self.fake, "brief.md"), "--model", "kimi")
+        p = self.orch("start", "w1", "--repo", "api", "--brief", os.path.join(self.fake, "brief.md"), "--model", "kimi")
         self.assertIn("kind=opencode", self.read(os.path.join("state", "w1", "meta")))
         self.assertIn("--kind opencode", self.read("started"))
-        self.assertIn("--model opencode/kimi-k3", self.read("started"))
+        # opencode v2 takes no --model: it runs its own configured model, and orch says so
+        self.assertNotIn("--model", self.read("started"))
+        self.assertIn("runs the one in its own config", p.stderr)
 
     def test_unknown_model_passes_through_to_the_role_harness(self):
         self.screens("Loading…\n")

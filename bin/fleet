@@ -18,6 +18,7 @@
   fleet config get <section.key>    one bare value (for shell tools)
   fleet skills status [--json]      which agent harnesses have the fleet skill, at which version
   fleet skills install [--to claude,codex,agents,opencode] [--yes]   copy it in (a stamped copy)
+  fleet skills refresh              re-copy the installed skills from this install (after a pull)
   fleet update [--check] [--json]   move to the newest release, after showing what changes
   fleet uninstall                   remove what install.sh added (config, keys, state stay)
   fleet remote serve|scopes|audit|status|logs   read-only fleet access for an agent on your tailnet
