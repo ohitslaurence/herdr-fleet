@@ -287,6 +287,10 @@ class StartAndWait(unittest.TestCase):
         self.assertEqual(self.read("prompts").splitlines(), [BRIEF_FIRST])
         self.assertIn(f"worktree {self.fake}/api-wt-w1", self.read(os.path.join("state", "w1", "brief.md")))
 
+    def test_wait_warns_when_no_watcher_will_report_back(self):
+        p = self.orch("wait", "--timeout", "1")
+        self.assertIn("the fleet watcher isn't running", p.stderr)  # HOME is a temp dir: no server there
+
     def test_model_nickname_brings_its_harness_and_model(self):
         with open(os.path.join(self.home, ".config", "fleet", "config.toml"), "w") as f:
             f.write('[models.kimi]\nharness = "opencode"\nmodel = "opencode/kimi-k3"\n')
