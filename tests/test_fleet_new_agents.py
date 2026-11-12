@@ -48,7 +48,8 @@ class Agents(unittest.TestCase):
             model = "gpt-6"
             """)
         self.assertEqual(N.default_agent(), "opencode")
-        self.assertEqual(N.agent_argv("opencode"), ["opencode", "--model", "opencode/kimi-k3", "--auto"])
+        # opencode v2 takes no model at launch: it runs its own configured one
+        self.assertEqual(N.agent_argv("opencode"), ["opencode", "--auto"])
         self.assertEqual(N.agent_argv("codex"), ["codex", "--model", "gpt-6", "--dangerously-bypass-approvals-and-sandbox"])
 
     def test_default_is_configurable_and_jev_is_told(self):

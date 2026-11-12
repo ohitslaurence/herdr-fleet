@@ -8,6 +8,12 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: opencode v2 dropped `--model` from its interactive screen, so `orch` and `fleet new` couldn't
+  start an opencode agent given a model. They now start it without one, and it runs the model set in
+  opencode's own config (`kinds.opencode.model_flag` is `""`); asking for another model prints a note.
+- New: `fleet skills refresh` re-copies the installed skills from this install; an install that follows
+  `main` instead of releases should run it after each pull (`fleet update` already does). A skill added
+  in a later release is now installed beside each existing fleet copy.
 - Fix: `ship --wait` and `orch wait` default to 540 s (were 1800 s and no limit), under Claude
   Code's 10-minute Bash cap. Past it, Claude Code backgrounded the wait. The ship and
   orchestrate skills tell Claude Code agents to give those calls a 600000 ms Bash timeout,

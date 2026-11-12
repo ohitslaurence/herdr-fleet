@@ -58,11 +58,11 @@ layers. Per-repo ship overrides go in `[repos.<name>]` with the same keys as `[s
 | `orch.quiet_min` | `5` | `orch wait` reports `quiet: idle Nm with no status` for a worker idle this long with no status line (a refused brief, a lost prompt) and returns 2 when every pending worker is quiet. `0` never reports. |
 | `kinds.<name>.cmd` | claude, codex, opencode built in | The command that starts the harness. Add `[kinds.<name>]` for any other. |
 | `kinds.<name>.bypass` | each harness's skip-permissions flag | Added only with `agents.permissions = "bypass"`. |
-| `kinds.<name>.model` / `.model_flag` | none / `"--model"` | Default model when the sentence names none (the driver role's model wins for the driver). |
+| `kinds.<name>.model` / `.model_flag` | none / `"--model"` (opencode: `""`) | Default model when the sentence names none (the driver role's model wins for the driver). `model_flag = ""`: the harness can't take a model at launch and runs its own configured one (opencode v2). |
 | `kinds.<name>.system_flag` | claude: `"--append-system-prompt"` | How `fleet new` gives an agent that starts idle the setup note (deps still installing). Without one, that note only reaches agents started on the sentence. |
 | `kinds.<name>.about` / `.names` | | Description, and the words that name the harness itself ("in opencode"). |
-| `kinds.<name>.models` / `.models_cmd` | claude's aliases / `opencode models` | Models the harness can run: a fixed list, and/or a command printing one id per line (cached a day). |
-| `models.<nickname>.harness` / `.model` / `.names` | none | Your own names for models: `[models.kimi] harness = "opencode"`, `model = "opencode/kimi-k3"`. "use kimi" then means that harness and model. |
+| `kinds.<name>.models` / `.models_cmd` | claude's aliases / none | Models the harness can run: a fixed list, and/or a command printing one id per line (cached a day). |
+| `models.<nickname>.harness` / `.model` / `.names` | none | Your own names for models: `[models.sol] harness = "codex"`, `model = "gpt-6.1-sol"`. "use sol" then means that harness and model. A harness with `model_flag = ""` (opencode) ignores `model`; `[models.kimi] harness = "opencode"` still names the harness. |
 
 How `fleet new` picks: a harness the sentence names wins; else a nickname's harness; else the
 harness of a model the sentence names; else `roles.driver.kind`. The model is the one named (from

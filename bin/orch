@@ -3,7 +3,7 @@
 # supervise them through an append-only status log.
 #
 #   orch start  <name> --repo <alias> --brief <file> [--role R] [--kind codex|claude|opencode] [--model M|<nickname>] [--effort low|medium|high|xhigh] [--workspace]
-#               opencode: --model provider/model (e.g. opencode/kimi-k3); effort doesn't apply
+#               opencode: runs the model in its own config (v2 has no --model); effort doesn't apply
 #               kind/model/effort default to `fleet role <R>` ([roles] in the fleet config; R defaults
 #               to worker; `--role security` for briefs Codex's cyber filter refuses)
 #               exit 1 "needs a human" when the agent shows a dialog orch won't answer (login, mode
@@ -151,6 +151,12 @@ PY
       "WORKTREE=$worktree" || die "brief not rendered"
 
   # 3. start the agent in the pane
+  # kinds.<kind>.model_flag "" = the harness can't take a model at launch (opencode v2), as in fleet new
+  local model_flag; model_flag=$("$BIN/fleet" config get "kinds.$kind.model_flag" 2>/dev/null || echo --model)
+  if [[ -n "$model" && -z "$model_flag" ]]; then
+    echo "orch: kinds.$kind.model_flag is \"\": $kind runs the model in its own config, not $model" >&2
+    model=""
+  fi
   local -a args
   case "$kind" in
     codex)
