@@ -341,6 +341,7 @@ class Watch:
     def __init__(self, cfg, dry):
         self.cfg, self.dry, self.s = cfg, dry, load_state()
         self.log = []
+        self.idle_since = {}  # pane: first seen idle (in memory: a restart waits quiet_min again)
 
     def say(self, msg):
         line = f"{iso(now())} {msg}"
@@ -470,8 +471,10 @@ class Watch:
 
         # 4. orchestrators: an idle orchestrator isn't watching `orch wait`; tell it which workers finished
         self.orch_report(by_pane)
+        # 5. ... and when every worker it waits on went quiet without finishing
+        self.orch_nudge_quiet(by_pane)
 
-        # 5. resolve inbox items whose pane went back to work or disappeared
+        # 6. resolve inbox items whose pane went back to work or disappeared
         for item in s["inbox"]:
             a = by_pane.get(item["pane"])
             if item["open"] and (a is None or a.get("agent_status") == "working"):
@@ -495,11 +498,27 @@ class Watch:
             if not self.dry:
                 for name, _, line in workers:
                     fleet_orch.mark_notified(home, name, line)
-        # Workers that stopped without a status line: nobody else will tell an idle orchestrator.
+
+    def orch_nudge_quiet(self, by_pane):
+        """Workers that stopped without a status line: nobody else tells an idle orchestrator.
+        A pane that's gone counts as idle from when it was last seen."""
+        t = now()
+        for pane in list(self.idle_since):
+            a = by_pane.get(pane)
+            if a and a.get("agent_status") not in ("idle", "done"):
+                del self.idle_since[pane]
+        for pane, a in by_pane.items():
+            if a.get("agent_status") in ("idle", "done"):
+                self.idle_since.setdefault(pane, t)
+        home = fleet_orch.home()
+        for d, meta, _ in fleet_orch.workers(home):  # a worker pane gone before we ever saw it idle
+            p = meta.get("pane", "")
+            if p and p not in by_pane:
+                self.idle_since.setdefault(p, t)
         quiet_min = fleet_config.get("orch", "quiet_min", 5)
         if not quiet_min:
             return
-        for pane, workers in fleet_orch.quiet(home, by_pane, quiet_min, now()).items():
+        for pane, workers in fleet_orch.quiet(home, self.idle_since, quiet_min, t).items():
             a = by_pane.get(pane)
             if not a or a.get("agent_status") not in ("idle", "done"):
                 continue

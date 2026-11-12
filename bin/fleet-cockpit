@@ -82,14 +82,16 @@ def current_rows():
     """Rows from the server when it answers, else computed here (reading only, so any failure
     may fall back)."""
     try:
-        got = served("rows")
-    except Exception:
-        got = None
+        got, error = served("rows"), None
+    except Exception as e:
+        got, error = None, f"{type(e).__name__}: {e}"
     if got:
         return got
     data = collect()
-    # nothing answered: no watcher is nudging agents about merges, finished workers or offers
-    data["watcher_down"] = True
+    if error:
+        data["watcher_error"] = error
+    else:  # nothing listening: no watcher is nudging agents about merges, finished workers or offers
+        data["watcher_down"] = True
     return data
 
 
@@ -656,6 +658,8 @@ class UI:
         down = f" · herdr unreachable: {self.data['herdr_error']}" if self.data.get("herdr_error") else ""
         if self.data.get("watcher_down"):
             down += " · WATCHER STOPPED: no agent is told about merges or finished workers (fleet server start)"
+        elif self.data.get("watcher_error"):
+            down += f" · watcher answered with an error: {self.data['watcher_error']}"
         scr.addnstr(0, 0, f" fleet · {len(rows)} items · PR data {age} old{down}", w - 1, curses.A_REVERSE)
         for y, (kind, val, idx) in enumerate(lines[self.top:self.top + body], start=1):
             if kind == "head":

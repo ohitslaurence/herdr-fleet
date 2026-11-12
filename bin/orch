@@ -294,8 +294,7 @@ cmd_wait() {
 
 # Without fleet watch nobody tells an idle orchestrator its workers finished or went quiet.
 warn_no_watcher() {
-  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import fleet_serve; sys.exit(0 if fleet_serve.call("ping", timeout=3) else 1)' \
-      "$BIN" >/dev/null 2>&1 && return 0
+  "$BIN/fleet" server status >/dev/null 2>&1 && return 0
   echo "orch: warning: the fleet watcher isn't running, so nothing will prompt you when workers finish or go quiet." \
        "Stay in \`orch wait\` until \"all terminal\", and tell the user (\`fleet server start\` is theirs to run)." >&2
 }

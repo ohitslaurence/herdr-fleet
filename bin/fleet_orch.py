@@ -211,20 +211,21 @@ def mark_notified(home, name, line):
     (Path(home) / name / "notified").write_text(line + "\n")
 
 
-def quiet(home, by_pane, quiet_min, now):
-    """Orchestrators all of whose unfinished workers went quiet: herdr shows them idle (or their
-    pane is gone) and their status log hasn't moved for quiet_min minutes. {orchestrator pane:
-    [(name, last status line)]}, leaving out an orchestrator any of whose workers is still busy,
-    and workers already nudged about this same line (the `nudged` file)."""
+def quiet(home, idle_since, quiet_min, now):
+    """Orchestrators all of whose unfinished workers went quiet, as `orch wait` means it: idle (by
+    herdr, or the pane is gone) for quiet_min minutes, with no status line since they went idle.
+    idle_since: {worker pane: when it was first seen idle}, kept by the caller. {orchestrator pane:
+    [(name, last status line)]}, leaving out an orchestrator any of whose workers isn't quiet, and
+    workers already nudged about this same line (the `nudged` file)."""
     out, busy = {}, set()
     for directory, meta, last in workers(home):
         by = meta.get("by")
         if not by or last.partition(":")[0] in TERMINAL:
             continue
-        a = by_pane.get(meta.get("pane", ""))
+        since = idle_since.get(meta.get("pane", ""))
         status = directory / "status"
         moved = status.stat().st_mtime if status.exists() else 0
-        if (a and a.get("agent_status") not in ("idle", "done")) or now - moved < quiet_min * 60:
+        if since is None or now - since < quiet_min * 60 or moved >= since:
             busy.add(by)
         elif _read(directory / "nudged").strip() != last:
             out.setdefault(by, []).append((directory.name, last))
