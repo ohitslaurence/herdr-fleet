@@ -135,8 +135,7 @@ DEFAULTS = {
         # opencode v2's interactive screen takes no --model (only `opencode run -m`): it runs the
         # model set in opencode's own config. model_flag "" = the harness can't pick one at launch.
         "opencode": {"cmd": ["opencode"], "bypass": ["--auto"], "model_flag": "",
-                     "about": "opencode (runs models from many providers)", "names": ["opencode"],
-                     "models_cmd": ["opencode", "models"]},
+                     "about": "opencode (runs the model in its own config)", "names": ["opencode"]},
     },
     "models": {},  # [models.<nickname>] harness, model, names: your words for models ("kimi")
     "repos": {},

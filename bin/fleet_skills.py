@@ -1,10 +1,10 @@
 """fleet_skills — install the fleet skills into each agent harness, as stamped copies.
 
   fleet skills status [--json]          which harnesses have them, at which version
-  fleet skills install [--to a,b] [--yes]   copy every skill under SKILLS into each harness's
-                                            skills folder
-  fleet skills refresh                  re-copy the installed ones from this checkout (fleet update and
-                                        an install that follows main both run it)
+  fleet skills install [--to a,b] [--yes]   copy each skill in skills/ that we ship into each
+                                            harness's skills folder
+  fleet skills refresh                  re-copy the installed ones from this checkout; fleet update runs
+                                        it, an install that follows main runs it after each pull
 
 `fleet` is the one every agent needs; `orchestrate` is for an agent driving workers with orch.
 

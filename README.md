@@ -210,9 +210,9 @@ permissions = "ask"               # "bypass": fleet new starts agents with permi
 [roles.driver]
 kind = "claude"                   # the agent fleet new starts unless the sentence names another
 
-[models.kimi]                     # your name for a model: "use kimi" picks this harness + model
-harness = "opencode"              # harnesses built in: claude, codex, opencode ([kinds.<name>] adds more)
-model = "opencode/kimi-k3"
+[models.sol]                      # your name for a model: "use sol" picks this harness + model
+harness = "codex"                 # harnesses built in: claude, codex, opencode ([kinds.<name>] adds more)
+model = "gpt-6.1-sol"             # opencode takes no model at launch: it runs the one in its own config
 
 [ship]
 review = "greptile"               # review bot ship waits on (bin/fleet_review.py), or "none"

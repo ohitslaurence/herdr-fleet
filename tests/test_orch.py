@@ -296,7 +296,7 @@ class StartAndWait(unittest.TestCase):
         self.assertIn("--kind opencode", self.read("started"))
         # opencode v2 takes no --model: it runs its own configured model, and orch says so
         self.assertNotIn("--model", self.read("started"))
-        self.assertIn("runs the one in its own config", p.stderr)
+        self.assertIn('kinds.opencode.model_flag is ""', p.stderr)
 
     def test_unknown_model_passes_through_to_the_role_harness(self):
         self.screens("Loading…\n")

@@ -151,6 +151,12 @@ PY
       "WORKTREE=$worktree" || die "brief not rendered"
 
   # 3. start the agent in the pane
+  # kinds.<kind>.model_flag "" = the harness can't take a model at launch (opencode v2), as in fleet new
+  local model_flag; model_flag=$("$BIN/fleet" config get "kinds.$kind.model_flag" 2>/dev/null || echo --model)
+  if [[ -n "$model" && -z "$model_flag" ]]; then
+    echo "orch: kinds.$kind.model_flag is \"\": $kind runs the model in its own config, not $model" >&2
+    model=""
+  fi
   local -a args
   case "$kind" in
     codex)
@@ -164,10 +170,9 @@ PY
       [[ -n "$effort" ]] && args+=(--effort "$effort")
       [[ -n "$model" ]] && args+=(--model "$model") ;;
     opencode)
-      # --auto: approve tool calls not explicitly denied (opencode's skip-permissions).
-      # v2's interactive screen takes no --model: it runs the model in opencode's own config.
+      # --auto: approve tool calls not explicitly denied (opencode's skip-permissions)
       args=(--auto)
-      [[ -n "$model" ]] && echo "orch: opencode can't pick a model per worker; it runs the one in its own config, not $model" >&2 ;;
+      [[ -n "$model" ]] && args+=(--model "$model") ;;
     *) die "kind must be codex, claude or opencode";;
   esac
   # Record the worker before anything else can fail, so `orch status/done` can clean up a bad start.

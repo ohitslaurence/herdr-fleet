@@ -26,6 +26,7 @@ object: read its fields, don't parse the text.
 | `fleet learn [--repo r] [--days N] [--json]` | read | What craft reviews found and what agents did with it. |
 | `fleet learn --propose` | ask first | One model call; proposals are saved, nothing applied. |
 | `fleet skills status [--json]` | read | Which agent harnesses have this skill, and at which version. |
+| `fleet skills refresh` | ask first | Re-copies the installed skills from this install (after pulling main). |
 | `fleet skills install [--to …]`, `fleet update`, `fleet uninstall` | human | Each shows what it changes, then asks. `fleet update --check` is read-only. |
 | `fleet remote scopes`, `fleet remote audit [-n N]`, `fleet remote status`, `fleet remote logs` | read | Which tailnet tags may read the fleet remotely, every remote call, the service. |
 | `fleet remote serve`, `fleet remote install\|uninstall` | human | Opens the read-only tailnet API (docs/remote.md), in a pane or as a service. |

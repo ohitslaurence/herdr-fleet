@@ -125,8 +125,7 @@ class Install(unittest.TestCase):
         forget = ("import sys; sys.path.insert(0, sys.argv[1]); import fleet_manifest; fleet_manifest.update("
                   "lambda m: m.__setitem__('skills', [s for s in m['skills'] if not s.endswith('orchestrate')]))")
         subprocess.run([sys.executable, "-c", forget, BIN], env=env, check=True, timeout=60)
-        refresh = "import sys; sys.path.insert(0, sys.argv[1]); import fleet_skills; fleet_skills.refresh()"
-        subprocess.run([sys.executable, "-c", refresh, BIN], env=env, check=True, timeout=60)
+        self.assertEqual(self.run_(home, "refresh").returncode, 0)
         return home, dest, env
 
     def test_refresh_brings_orchestrate_back_beside_an_old_fleet_install(self):
