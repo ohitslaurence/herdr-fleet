@@ -6,7 +6,8 @@
   fleet skills refresh                  re-copy the installed ones from this checkout; fleet update runs
                                         it, an install that follows main runs it after each pull
 
-`fleet` is the one every agent needs; `orchestrate` is for an agent driving workers with orch.
+`fleet` is the one every agent needs; `orchestrate` is for an agent driving workers with orch;
+`design-council` runs a multi-model design and red team on top of it.
 
 A copy, never a symlink into this checkout: what an agent follows changes only when you
 install or update, not when someone edits the checkout. The copy's SKILL.md carries this
@@ -17,7 +18,7 @@ import json, os, shutil, sys, tempfile
 import fleet_manifest
 import fleet_version
 
-SKILLS = ("fleet", "orchestrate")  # folders under skills/, installed side by side in each harness
+SKILLS = ("fleet", "orchestrate", "design-council")  # folders under skills/, installed side by side in each harness
 HARNESSES = {  # name: (the harness's own dir, which must exist, and its skills folder)
     "claude": ("~/.claude", "~/.claude/skills"),
     "codex": ("~/.codex", "~/.codex/skills"),

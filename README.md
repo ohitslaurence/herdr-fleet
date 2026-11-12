@@ -262,7 +262,7 @@ Keys live in `~/.config/fleet/env`, readable only by you (a file others can read
 | `bin/dev`, `bin/orch` | worktree sessions; worker supervision |
 | `bin/fleet_*.py` | config, doctor, setup, keys, server, install, skills, learn, decisions |
 | `install.sh` | the installer (`bin/fleet_install.py` also does update and uninstall) |
-| `skills/` | the `fleet` and `orchestrate` skills, plus the guides `ship guide` serves |
+| `skills/` | the `fleet`, `orchestrate` and `design-council` skills, plus the guides `ship guide` serves |
 | `herdr-plugin.toml` | the herdr plugin (cockpit and new-session popups) |
 | `docs/configuration.md`, `SECURITY.md`, `CHANGELOG.md`, `AGENTS.md` | reference |
 | `tests/` | `python3 -m unittest discover -s tests` (golden tests on anonymised real PRs) |
