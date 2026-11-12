@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Run and supervise several worker agents (Codex, Claude or OpenCode) in parallel on separate dev worktrees via herdr, using the `orch` CLI and a brief template. Use when the user asks to fan a task out across workers, run an investigation or fix per item with one agent driving the others, or supervise autonomous workers to completion. Requires HERDR_ENV=1.
+description: Split work across several agents running in parallel (Claude, Codex, Kimi on opencode), each in its own herdr pane and worktree, and drive them to done with `orch`. Use when a task breaks into independent items (one per repo, PR, finding, service or file group), when you want second opinions from different models, or when the job is too big for one context; propose it to the user even if they didn't ask. Also when the user says fan out, parallelise, spin up agents or workers, or orchestrate. For a design that several models should draft and red-team into a consensus, use the design-council skill. Requires HERDR_ENV=1.
 metadata:
   version: "{{FLEET_VERSION}}"
 ---
@@ -70,9 +70,14 @@ checks off, whatever `agents.permissions` says: nobody is there to answer a prom
 6. **Decide.** Approve, reject, or send the worker back with a specific
    correction. Promote approved fixes to a second phase (commit, PR) with
    a new brief that says exactly what to ship.
-7. **Close.** `orch done <name>` when a worker's work has landed or been
-   rejected. Keep a running summary for the user: outcome per worker, what
-   needs their decision, what you did on their behalf.
+7. **Close.** `orch done <name>` as soon as a worker is finished and you won't
+   prompt it again (its work landed, was rejected, or its report is all you
+   need): it closes the worker's pane and removes its worktree. Don't wait
+   for the end to close them all. Before your final summary, every worker
+   you started is closed, or named in the summary as kept open on purpose,
+   with why. Idle panes cost the user memory and attention. Keep a running
+   summary for the user: outcome per worker, what needs their decision,
+   what you did on their behalf.
 
 ## Rules
 
@@ -89,6 +94,8 @@ checks off, whatever `agents.permissions` says: nobody is there to answer a prom
   wait once more. If it fails again, mark it failed in your summary and move
   on; do not loop.
 - Never `max` effort unless the user asked.
+- Clean up after yourself: no idle worker panes left behind once you're done
+  with them (step 7). `orch status` lists what's still open.
 - Do not end your turn while workers are running unless you have told the
   user exactly which are still running and what you will do when they
   finish.

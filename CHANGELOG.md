@@ -8,6 +8,13 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- New skill `design-council`: two or three designers on different harnesses (Claude, Codex, plus Kimi
+  on opencode for security-related or high-stakes work) design independently, red-team each other,
+  revise, and the orchestrator judges a consensus design with the open disagreements laid out
+  (an Artifact from Claude, `docs/design/` from Codex). `fleet skills install`/`refresh` install it.
+- The orchestrate skill's description now says when to use it (independent items, second opinions,
+  too big for one context) and that an agent may propose it unasked; it tells the orchestrator to
+  `orch done` each worker as soon as it's finished, not leave idle panes behind.
 - New: fleet watch nudges an idle orchestrator once when every worker it still waits on has been idle
   `orch.quiet_min` minutes (5) without a status line (or its pane is gone): "check them, don't wait".
   Before, only a worker's terminal status line woke it, so workers that stopped silently left it idle.

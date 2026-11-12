@@ -140,6 +140,20 @@ class Install(unittest.TestCase):
                 self.assertEqual(u.returncode, 0, u.stderr)
                 self.assertFalse(os.path.exists(dest))  # recorded, so uninstall takes it back
 
+    def test_refresh_adds_a_skill_from_a_later_release(self):
+        home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(home, ".claude"))
+        self.assertEqual(self.run_(home, "install", "--to", "claude", "--yes").returncode, 0)
+        dest = os.path.join(home, ".claude", "skills", "design-council")
+        shutil.rmtree(dest)  # installed before design-council existed
+        env = dict(os.environ, HOME=home, PATH=f"{BIN}:{SYSTEM_PATH}")
+        forget = ("import sys; sys.path.insert(0, sys.argv[1]); import fleet_manifest; fleet_manifest.update("
+                  "lambda m: m.__setitem__('skills', [s for s in m['skills'] if not s.endswith('design-council')]))")
+        subprocess.run([sys.executable, "-c", forget, BIN], env=env, check=True, timeout=60)
+        self.assertEqual(self.run_(home, "refresh").returncode, 0)
+        self.assertIn("name: design-council", Path(dest, "SKILL.md").read_text())
+        self.assertTrue(json.loads(self.run_(home, "status", "--json").stdout)["harnesses"]["claude"]["current"])
+
     def test_refresh_leaves_someone_elses_orchestrate_alone(self):
         home, dest, _ = self.old_install("foreign")
         self.assertIn("name: someone-elses", Path(dest, "SKILL.md").read_text())
