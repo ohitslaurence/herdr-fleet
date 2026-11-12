@@ -64,6 +64,10 @@ class Drift(unittest.TestCase):
     def test_references_exist(self):
         for name in SKILLS:
             text = skill_text(name)
+            for sibling, ref in re.findall(r"`\.\./([\w-]+)/([\w.-]+)`", text):  # another skill's file
+                with self.subTest(skill=name, ref=f"../{sibling}/{ref}"):
+                    self.assertIn(sibling, SKILLS, "installed beside it only if it's one of ours")
+                    self.assertTrue(os.path.exists(os.path.join(skill_dir(sibling), ref)), ref)
             for ref in set(re.findall(r"`reference/([\w.-]+)`", text)) | set(re.findall(r"`([\w-]+\.md)`", text)):
                 if ref in ("SKILL.md",):
                     continue
@@ -107,23 +111,22 @@ class Install(unittest.TestCase):
         self.assertFalse(os.path.exists(orchestrate))
         self.assertTrue(os.path.exists(os.path.join(home, ".codex", "skills", "fleet")))
 
-    def old_install(self, orchestrate):
-        """An install from v0.3.0: a fleet copy recorded, and `orchestrate` as given (None: absent,
-        "link": a link to the old folder, "foreign": someone else's skill of that name)."""
+    def old_install(self, before, skill="orchestrate"):
+        """An install from before `skill` existed: a fleet copy recorded, and `skill` as given (None:
+        absent, "link": a link to an old folder, "foreign": someone else's skill of that name)."""
         home = tempfile.mkdtemp()
         os.makedirs(os.path.join(home, ".claude"))
         self.assertEqual(self.run_(home, "install", "--to", "claude", "--yes").returncode, 0)
-        skills = os.path.join(home, ".claude", "skills")
-        dest = os.path.join(skills, "orchestrate")
+        dest = os.path.join(home, ".claude", "skills", skill)
         shutil.rmtree(dest)
-        if orchestrate == "link":
-            os.symlink(os.path.join(home, "gone", "orchestrate"), dest)
-        elif orchestrate == "foreign":
+        if before == "link":
+            os.symlink(os.path.join(home, "gone", skill), dest)
+        elif before == "foreign":
             os.makedirs(dest)
             Path(dest, "SKILL.md").write_text("---\nname: someone-elses\n---\n")
         env = dict(os.environ, HOME=home, PATH=f"{BIN}:{SYSTEM_PATH}")
         forget = ("import sys; sys.path.insert(0, sys.argv[1]); import fleet_manifest; fleet_manifest.update("
-                  "lambda m: m.__setitem__('skills', [s for s in m['skills'] if not s.endswith('orchestrate')]))")
+                  f"lambda m: m.__setitem__('skills', [s for s in m['skills'] if not s.endswith('/{skill}')]))")
         subprocess.run([sys.executable, "-c", forget, BIN], env=env, check=True, timeout=60)
         self.assertEqual(self.run_(home, "refresh").returncode, 0)
         return home, dest, env
@@ -140,19 +143,12 @@ class Install(unittest.TestCase):
                 self.assertEqual(u.returncode, 0, u.stderr)
                 self.assertFalse(os.path.exists(dest))  # recorded, so uninstall takes it back
 
-    def test_refresh_adds_a_skill_from_a_later_release(self):
-        home = tempfile.mkdtemp()
-        os.makedirs(os.path.join(home, ".claude"))
-        self.assertEqual(self.run_(home, "install", "--to", "claude", "--yes").returncode, 0)
-        dest = os.path.join(home, ".claude", "skills", "design-council")
-        shutil.rmtree(dest)  # installed before design-council existed
-        env = dict(os.environ, HOME=home, PATH=f"{BIN}:{SYSTEM_PATH}")
-        forget = ("import sys; sys.path.insert(0, sys.argv[1]); import fleet_manifest; fleet_manifest.update("
-                  "lambda m: m.__setitem__('skills', [s for s in m['skills'] if not s.endswith('design-council')]))")
-        subprocess.run([sys.executable, "-c", forget, BIN], env=env, check=True, timeout=60)
-        self.assertEqual(self.run_(home, "refresh").returncode, 0)
-        self.assertIn("name: design-council", Path(dest, "SKILL.md").read_text())
-        self.assertTrue(json.loads(self.run_(home, "status", "--json").stdout)["harnesses"]["claude"]["current"])
+    def test_refresh_adds_every_skill_from_a_later_release(self):
+        for skill in SKILLS[1:]:  # fleet is the anchor the others are added beside
+            with self.subTest(skill=skill):
+                home, dest, _ = self.old_install(None, skill)
+                self.assertIn(f"name: {skill}", Path(dest, "SKILL.md").read_text())
+                self.assertTrue(json.loads(self.run_(home, "status", "--json").stdout)["harnesses"]["claude"]["current"])
 
     def test_refresh_leaves_someone_elses_orchestrate_alone(self):
         home, dest, _ = self.old_install("foreign")

@@ -94,8 +94,7 @@ checks off, whatever `agents.permissions` says: nobody is there to answer a prom
   wait once more. If it fails again, mark it failed in your summary and move
   on; do not loop.
 - Never `max` effort unless the user asked.
-- Clean up after yourself: no idle worker panes left behind once you're done
-  with them (step 7). `orch status` lists what's still open.
+- `orch status` lists the workers still open; close finished ones (step 7).
 - Do not end your turn while workers are running unless you have told the
   user exactly which are still running and what you will do when they
   finish.
