@@ -85,14 +85,23 @@ def current_rows():
         got, error = served("rows"), None
     except Exception as e:
         got, error = None, f"{type(e).__name__}: {e}"
-    if got:
-        return got
-    data = collect()
-    if error:
-        data["watcher_error"] = error
-    else:  # nothing listening: no watcher is nudging agents about merges, finished workers or offers
-        data["watcher_down"] = True
+    data = got or collect()
+    if not got:
+        if error:
+            data["watcher_error"] = error
+        else:  # nothing listening: no watcher is nudging agents about merges, finished workers or offers
+            data["watcher_down"] = True
+    try:
+        import fleet_gripe
+        data["gripes_unseen"] = fleet_gripe.unseen()
+    except Exception:  # a broken gripe log must not take the cockpit down
+        pass
     return data
+
+
+def gripes_note(data):
+    n = data.get("gripes_unseen")
+    return f" · {n} new gripe{'s' * (n != 1)} from agents (fleet gripes)" if n else ""
 
 
 def jload(path, default):
@@ -449,7 +458,7 @@ def print_listing(data, as_json=False, show_all=False):
         print(json.dumps(data, indent=1))
         return
     age = ago(data["refreshed_at"])
-    print(f"fleet  ·  PR data {age + ' old' if age else 'never refreshed'} (fleet ls --refresh)")
+    print(f"fleet  ·  PR data {age + ' old' if age else 'never refreshed'} (fleet ls --refresh){gripes_note(data)}")
     for sec in SECTIONS:
         rows = [r for r in data["rows"] if r["section"] == sec]
         if not rows:
@@ -660,7 +669,7 @@ class UI:
             down += " · WATCHER STOPPED: no agent is told about merges or finished workers (fleet server start)"
         elif self.data.get("watcher_error"):
             down += f" · watcher answered with an error: {self.data['watcher_error']}"
-        scr.addnstr(0, 0, f" fleet · {len(rows)} items · PR data {age} old{down}", w - 1, curses.A_REVERSE)
+        scr.addnstr(0, 0, f" fleet · {len(rows)} items · PR data {age} old{down}{gripes_note(self.data)}", w - 1, curses.A_REVERSE)
         for y, (kind, val, idx) in enumerate(lines[self.top:self.top + body], start=1):
             if kind == "head":
                 scr.addnstr(y, 0, val, w - 1, curses.A_BOLD | curses.color_pair(head_color(val)))

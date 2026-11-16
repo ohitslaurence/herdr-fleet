@@ -8,6 +8,10 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- New: `fleet gripe "<what went wrong>"` logs friction an agent hit (with `--tried`, `--cost`, `--fix`,
+  `--about`; pane, kind, repo, branch and orch worker filled in), redacted, to
+  `~/.local/state/fleet/gripes.jsonl` on this machine. `fleet gripes` reads them grouped by topic; the
+  cockpit header counts the ones no human has read. New skill `gripe` tells agents when to use it.
 - New skill `design-council`: two or three designers on different harnesses (Claude, Codex, plus Kimi
   on opencode for security-related or high-stakes work) design independently, red-team each other,
   revise, and the orchestrator judges a consensus design with the open disagreements laid out

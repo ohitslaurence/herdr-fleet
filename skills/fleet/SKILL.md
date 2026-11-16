@@ -79,12 +79,13 @@ it again, until a terminal state (`deployed`, `awaiting-human`, `needs-human`, `
 
 READ (run freely):
 `fleet ls [--json]` · `fleet inbox [--json]` · `fleet why` · `fleet config show [key]` ·
-`fleet doctor` · `fleet version` · `fleet server status` · `fleet keys status` · `fleet learn` ·
+`fleet doctor` · `fleet version` · `fleet server status` · `fleet keys status` · `fleet learn` · `fleet gripes --json` ·
 `fleet update --check` · `ship pr <ref>` · `ship [<pr>] --json` · `ship findings` ·
 `ship policy` · `ship guide <topic>` · `dev ls` · `dev repos` · `orch status` · `orch report <n>`
 
 WRITE (in your own worktree or PR):
 `fleet note "<one plain sentence>"` (when you start, open a PR, or change goal) ·
+`fleet gripe "<what went wrong>"` (friction you hit: the `gripe` skill) ·
 `ship --act --wait` · `ship findings <id>... fixed|dismissed "<why>"` · `dev pr-checkout <n>` ·
 `fleet inbox done <id>` (only items you resolved)
 

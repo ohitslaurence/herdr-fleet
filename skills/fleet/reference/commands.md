@@ -23,6 +23,8 @@ object: read its fields, don't parse the text.
 | `fleet server status [--json]`, `fleet server logs [-n N]` | read | The watcher: running, pid, version, last pass, herdr events, unit. |
 | `fleet server start\|stop\|restart` | ask first | Through the installed unit. |
 | `fleet server install\|uninstall` | human | Shows the unit file, then asks. |
+| `fleet gripe "<what went wrong>" [--tried …] [--cost …] [--fix …] [--about …]` | write | Logs friction you hit (the `gripe` skill). Local only, redacted; exit 2 on bad input. |
+| `fleet gripes [--since 7d] [--all] [--json]` | read | Grouped by `--about`, else repo. `--json`: `{gripes:[{at, text, tried?, cost?, fix?, about?, kind?, pane?, worker?, repo?, branch?, cwd}], unseen}`; without `--json` it marks them seen. |
 | `fleet learn [--repo r] [--days N] [--json]` | read | What craft reviews found and what agents did with it. |
 | `fleet learn --propose` | ask first | One model call; proposals are saved, nothing applied. |
 | `fleet skills status [--json]` | read | Which agent harnesses have this skill, and at which version. |

@@ -162,6 +162,7 @@ as one unix user, so local gates are guards, not boundaries): [SECURITY.md](SECU
 | `orch start` · `wait` · `report` | supervise worker agents |
 | `fleet doctor` · `setup` · `keys` · `server` · `skills` | install health and setup |
 | `fleet learn [--propose]` | turn review verdicts into rules |
+| `fleet gripe "<what>"`, `fleet gripes` | agents log friction they hit; you read it grouped by tool |
 | `fleet config show [key]` | every setting and where it came from |
 | `fleet update` · `uninstall` · `version` | lifecycle |
 
@@ -262,7 +263,7 @@ Keys live in `~/.config/fleet/env`, readable only by you (a file others can read
 | `bin/dev`, `bin/orch` | worktree sessions; worker supervision |
 | `bin/fleet_*.py` | config, doctor, setup, keys, server, install, skills, learn, decisions |
 | `install.sh` | the installer (`bin/fleet_install.py` also does update and uninstall) |
-| `skills/` | the `fleet`, `orchestrate` and `design-council` skills, plus the guides `ship guide` serves |
+| `skills/` | the `fleet`, `orchestrate`, `design-council` and `gripe` skills, plus the guides `ship guide` serves |
 | `herdr-plugin.toml` | the herdr plugin (cockpit and new-session popups) |
 | `docs/configuration.md`, `SECURITY.md`, `CHANGELOG.md`, `AGENTS.md` | reference |
 | `tests/` | `python3 -m unittest discover -s tests` (golden tests on anonymised real PRs) |
