@@ -137,14 +137,12 @@ _REMOTE = {}
 def git_info(cwd):
     """(owner/repo, branch) for a pane's checkout, or None. Runs every pass for every pane, so
     the branch is read from git's files and the remote is cached per checkout (no processes)."""
-    from fleet_paths import head_branch
+    from fleet_paths import github_slug, head_branch
     branch = head_branch(cwd)
     if not branch or branch in ("HEAD", "main", "master"):
         return None
     if cwd not in _REMOTE:
-        url = run("git", "-C", cwd, "remote", "get-url", "origin") or ""
-        m = re.search(r"github\.com[:/]([^/]+/[^/.\s]+?)(?:\.git)?\s*$", url.strip())
-        _REMOTE[cwd] = m.group(1) if m else None
+        _REMOTE[cwd] = github_slug(run("git", "-C", cwd, "remote", "get-url", "origin"))
     return (_REMOTE[cwd], branch) if _REMOTE[cwd] else None
 
 

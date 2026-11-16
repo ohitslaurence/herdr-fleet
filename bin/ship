@@ -854,11 +854,7 @@ def author_kind():
                     return a["agent"]
         except (json.JSONDecodeError, FileNotFoundError):
             pass
-    if os.environ.get("CLAUDECODE"):
-        return "claude"
-    if any(k.startswith("CODEX_") for k in os.environ):
-        return "codex"
-    return None
+    return proc.env_agent_kind(os.environ)
 
 
 def ensure_label(o, r, n, labels):

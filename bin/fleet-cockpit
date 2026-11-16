@@ -85,14 +85,28 @@ def current_rows():
         got, error = served("rows"), None
     except Exception as e:
         got, error = None, f"{type(e).__name__}: {e}"
-    if got:
-        return got
-    data = collect()
-    if error:
-        data["watcher_error"] = error
-    else:  # nothing listening: no watcher is nudging agents about merges, finished workers or offers
-        data["watcher_down"] = True
+    data = got or collect()
+    if not got:
+        if error:
+            data["watcher_error"] = error
+        else:  # nothing listening: no watcher is nudging agents about merges, finished workers or offers
+            data["watcher_down"] = True
+    data["gripes_unseen"] = gripes_unseen()
     return data
+
+
+def gripes_unseen():
+    """None when the gripe log can't be read: that must not take the cockpit down."""
+    import fleet_gripe
+    try:
+        return fleet_gripe.unseen()
+    except (OSError, RuntimeError):  # RuntimeError: fleet_state's "not valid JSON"
+        return None
+
+
+def gripes_note(data):
+    n = data.get("gripes_unseen")
+    return f" · {n} new gripe{'s' * (n != 1)} from agents (fleet gripes)" if n else ""
 
 
 def jload(path, default):
@@ -118,8 +132,9 @@ def git_info(cwd):
     if not out or not url:
         return None
     branch, root = (out.split("\n") + [""])[:2]
-    m = re.search(r"github\.com[:/]([^/]+/[^/.\s]+?)(?:\.git)?\s*$", url.strip())
-    return (m.group(1), branch.strip(), root.strip()) if m else None
+    from fleet_paths import github_slug
+    slug = github_slug(url)
+    return (slug, branch.strip(), root.strip()) if slug else None
 
 
 def worktree_root(cwd):
@@ -449,7 +464,7 @@ def print_listing(data, as_json=False, show_all=False):
         print(json.dumps(data, indent=1))
         return
     age = ago(data["refreshed_at"])
-    print(f"fleet  ·  PR data {age + ' old' if age else 'never refreshed'} (fleet ls --refresh)")
+    print(f"fleet  ·  PR data {age + ' old' if age else 'never refreshed'} (fleet ls --refresh){gripes_note(data)}")
     for sec in SECTIONS:
         rows = [r for r in data["rows"] if r["section"] == sec]
         if not rows:
@@ -660,7 +675,7 @@ class UI:
             down += " · WATCHER STOPPED: no agent is told about merges or finished workers (fleet server start)"
         elif self.data.get("watcher_error"):
             down += f" · watcher answered with an error: {self.data['watcher_error']}"
-        scr.addnstr(0, 0, f" fleet · {len(rows)} items · PR data {age} old{down}", w - 1, curses.A_REVERSE)
+        scr.addnstr(0, 0, f" fleet · {len(rows)} items · PR data {age} old{down}{gripes_note(self.data)}", w - 1, curses.A_REVERSE)
         for y, (kind, val, idx) in enumerate(lines[self.top:self.top + body], start=1):
             if kind == "head":
                 scr.addnstr(y, 0, val, w - 1, curses.A_BOLD | curses.color_pair(head_color(val)))

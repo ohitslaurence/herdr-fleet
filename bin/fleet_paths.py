@@ -32,6 +32,13 @@ import fleet_config  # noqa: E402
 # need dependencies a fresh worktree doesn't have yet, and fail it: git exits 1 with the checkout
 # made. Every tool's own install step does what such a hook wanted. (orch spells it out in bash.)
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+_GITHUB_SLUG = re.compile(r"github\.com[:/]([^/]+/[^/.\s]+?)(?:\.git)?\s*$")
+
+
+def github_slug(url):
+    """owner/repo from a GitHub remote URL (ssh or https), else None."""
+    m = _GITHUB_SLUG.search((url or "").strip())
+    return m.group(1) if m else None
 
 DEFAULTS = {"path": "{repo_path}-wt-{task}", "pr_path": "{repo_path}-wt-pr-{number}", "branch": "{repo}__{task}"}
 _cache = {}
