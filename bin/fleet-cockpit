@@ -91,12 +91,17 @@ def current_rows():
             data["watcher_error"] = error
         else:  # nothing listening: no watcher is nudging agents about merges, finished workers or offers
             data["watcher_down"] = True
-    try:
-        import fleet_gripe
-        data["gripes_unseen"] = fleet_gripe.unseen()
-    except Exception:  # a broken gripe log must not take the cockpit down
-        pass
+    data["gripes_unseen"] = gripes_unseen()
     return data
+
+
+def gripes_unseen():
+    """None when the gripe log can't be read: that must not take the cockpit down."""
+    import fleet_gripe
+    try:
+        return fleet_gripe.unseen()
+    except (OSError, RuntimeError):  # RuntimeError: fleet_state's "not valid JSON"
+        return None
 
 
 def gripes_note(data):
@@ -127,8 +132,9 @@ def git_info(cwd):
     if not out or not url:
         return None
     branch, root = (out.split("\n") + [""])[:2]
-    m = re.search(r"github\.com[:/]([^/]+/[^/.\s]+?)(?:\.git)?\s*$", url.strip())
-    return (m.group(1), branch.strip(), root.strip()) if m else None
+    from fleet_paths import github_slug
+    slug = github_slug(url)
+    return (slug, branch.strip(), root.strip()) if slug else None
 
 
 def worktree_root(cwd):

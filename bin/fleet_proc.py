@@ -25,6 +25,17 @@ def run(args, timeout=None, **kw):
         return subprocess.CompletedProcess(args, 124, "", f"{args[0]}: timed out after {timeout} s")
 
 
+def env_agent_kind(env):
+    """Which harness this process runs under, from the variables each one sets; None if unknown."""
+    if env.get("CLAUDECODE"):
+        return "claude"
+    if any(k.startswith("CODEX_") for k in env):
+        return "codex"
+    if env.get("OPENCODE") or any(k.startswith("OPENCODE_") for k in env):
+        return "opencode"
+    return None
+
+
 def gh_text(*args, timeout=None):
     """`gh <args>`'s stdout, or None if it failed or timed out."""
     p = run(["gh", *args], timeout=timeout)

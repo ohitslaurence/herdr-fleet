@@ -69,9 +69,10 @@ class Gripe(unittest.TestCase):
         self.assertEqual(unseen(), 3)  # --json is for agents: it doesn't mark them read
         out = self.fleet("gripes").stdout
         self.assertLess(out.index("orch (2)"), out.index("acme/widgets (1)"))
-        self.assertIn("* ", out)
+        self.assertRegex(out, r"(?m)^ \* \S+ \S+  \?: orch wait replays old lines$")
+        self.assertRegex(out, r"(?m)^ \* \S+ \S+  \?: tests need docker$")
         self.assertEqual(unseen(), 0)
-        self.assertNotIn("* ", self.fleet("gripes").stdout)
+        self.assertRegex(self.fleet("gripes").stdout, r"(?m)^   \S+ \S+  \?: tests need docker$")
 
     def test_since_window(self):
         self.fleet("gripe", "old one")
@@ -83,6 +84,19 @@ class Gripe(unittest.TestCase):
         self.assertIn("old one", self.fleet("gripes", "--all").stdout)
         self.assertIn("old one", self.fleet("gripes", "--since", "520w").stdout)
         self.assertEqual(self.fleet("gripes", "--since", "soon").returncode, 2)
+
+    def test_a_corrupt_seen_mark_is_reported_not_crashed_on(self):
+        self.fleet("gripe", "x")
+        Path(self.home, ".local/state/fleet/gripes-seen.json").write_text("{nope")
+        p = self.fleet("gripes")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("not valid JSON", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2]); "
+                "from test_fleet_gh import load_cockpit; print(load_cockpit().gripes_unseen())")
+        out = subprocess.run([sys.executable, "-c", code, BIN, os.path.dirname(__file__)], env=self.env,
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.strip(), "None", out.stderr)
 
     def test_cockpit_counts_unseen(self):
         sys.path.insert(0, BIN)

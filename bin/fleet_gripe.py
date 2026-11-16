@@ -10,10 +10,11 @@ comes from the environment: pane, agent kind, repo, branch and the orch worker n
 `fleet gripes` lists them grouped by what they're about, newest first; reading it as a human
 (no --json) marks them seen, and the cockpit counts the unseen ones.
 """
-import json, os, re, subprocess, sys
+import json, os, re, sys
 from datetime import datetime, timedelta, timezone
 
-import fleet_redact, fleet_state
+import fleet_proc, fleet_redact, fleet_state
+from fleet_paths import github_slug, head_branch
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
 LOG = os.path.join(STATE_DIR, "gripes.jsonl")
@@ -29,32 +30,10 @@ def now():
     return datetime.now(timezone.utc)
 
 
-def _git(cwd, *args):
-    try:
-        p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return p.stdout.strip() if p.returncode == 0 else ""
-
-
 def repo_of(cwd):
-    """owner/name from origin, else the folder name; None outside a repo."""
-    url = _git(cwd, "remote", "get-url", "origin")
-    m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?/?$", url)
-    if m:
-        return m.group(1)
-    top = _git(cwd, "rev-parse", "--show-toplevel")
-    return os.path.basename(top) if top else None
-
-
-def agent_kind(env):
-    if env.get("CLAUDECODE"):
-        return "claude"
-    if any(k.startswith("CODEX_") for k in env):
-        return "codex"
-    if env.get("OPENCODE") or any(k.startswith("OPENCODE_") for k in env):
-        return "opencode"
-    return None
+    """owner/repo of the GitHub origin, as the cockpit shows it; None otherwise."""
+    p = fleet_proc.run(["git", "-C", cwd, "remote", "get-url", "origin"])
+    return github_slug(p.stdout) if p.returncode == 0 else None
 
 
 def worker_of(pane):
@@ -98,8 +77,8 @@ def gripe(argv, env=None, cwd=None):
     pane = env.get("HERDR_PANE_ID")
     entry = {"at": now().isoformat(timespec="seconds"), "text": clean(text),
              **{k: clean(v) for k, v in extra.items()},
-             "kind": agent_kind(env), "pane": pane, "worker": worker_of(pane),
-             "repo": repo_of(cwd), "branch": _git(cwd, "branch", "--show-current") or None, "cwd": cwd}
+             "kind": fleet_proc.env_agent_kind(env), "pane": pane, "worker": worker_of(pane),
+             "repo": repo_of(cwd), "branch": head_branch(cwd), "cwd": cwd}
     fleet_state.append_jsonl(LOG, {k: v for k, v in entry.items() if v}, MAX_BYTES)
     return entry
 
@@ -123,10 +102,23 @@ def seen_at():
     return fleet_state.read(SEEN, {}).get("at", "")
 
 
+_UNSEEN = {}
+
+
 def unseen():
-    """How many gripes came in since a human last read `fleet gripes`."""
-    seen = seen_at()
-    return sum(g.get("at", "") > seen for g in read_all())
+    """How many gripes came in since a human last read `fleet gripes`. The cockpit asks on every
+    refresh, so the count is cached until the log or the seen mark changes."""
+    def mtime(p):
+        try:
+            return os.stat(p).st_mtime_ns
+        except FileNotFoundError:
+            return None
+    key = (mtime(LOG), mtime(SEEN))
+    if key not in _UNSEEN:
+        seen = seen_at()
+        _UNSEEN.clear()
+        _UNSEEN[key] = sum(g.get("at", "") > seen for g in read_all())
+    return _UNSEEN[key]
 
 
 def since(spec):
@@ -192,4 +184,7 @@ def main(argv):
     except ValueError as e:
         print(f"fleet {cmd}: {e}\n{USAGE}", file=sys.stderr)
         return 2
+    except RuntimeError as e:  # a corrupt seen mark
+        print(f"fleet {cmd}: {e}", file=sys.stderr)
+        return 1
     return 0

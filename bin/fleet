@@ -36,6 +36,9 @@ Config: ~/.config/fleet/config.toml (+ team preset); see fleet_config.py.
 """
 import json, os, sys
 
+FREE_TEXT = (["gripe"], ["note"])  # subcommands whose arguments are a sentence
+
+
 def families():
     """[agents] opposite: roles with kind = "opposite" pick the other of these two."""
     import fleet_config
@@ -78,9 +81,14 @@ def main(argv):
     here = os.path.dirname(os.path.realpath(__file__))
     # help anywhere prints help and does nothing else: agents explore with --help, and
     # `fleet note --help` must not save a note, `fleet watch --help` must not start a watcher
-    # (a gripe is free text: only the flags count there, so `fleet gripe help text is wrong` logs)
-    if any(a in ("-h", "--help") or (a == "help" and argv[0] != "gripe") for a in argv):
-        print(__doc__.strip())
+    # (free text takes the word: `fleet gripe help is vague` logs a gripe, it doesn't print help)
+    if any(a in ("-h", "--help") or (a == "help" and argv[:1] not in FREE_TEXT) for a in argv):
+        if argv[:1] in (["gripe"], ["gripes"]):
+            sys.path.insert(0, here)
+            import fleet_gripe
+            print(fleet_gripe.__doc__.strip())
+        else:
+            print(__doc__.strip())
         return
     if argv[:1] == ["keys"]:
         sys.path.insert(0, here)
