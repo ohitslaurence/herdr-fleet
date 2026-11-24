@@ -46,7 +46,7 @@ class Actions:
         """Workflows that ran on each of the last HISTORY_PUSHES pushes to base before `before`
         (the merge time; a workflow added since doesn't count) other than sha. The push history
         is cached an hour. None when history is too short or GitHub can't say."""
-        cache = os.path.join(self.state_dir, "deploy-expected-v2.json")  # v1 held push runs only
+        cache = os.path.join(self.state_dir, "deploy-expected.json")
         try:
             with open(cache) as f:
                 c = json.load(f)

@@ -274,7 +274,7 @@ class Timeouts(unittest.TestCase):
 
 class FakeCockpit:
     def __init__(self, delay=0.3, fail=False):
-        self.delay, self.fail, self.refreshes = delay, fail, 0
+        self.delay, self.fail, self.refreshes, self.rechecks = delay, fail, 0, 0
 
     def refresh(self, quiet, inprocess):
         self.refreshes += 1
@@ -285,8 +285,8 @@ class FakeCockpit:
     def collect(self):
         return {"rows": [], "n": self.refreshes}
 
-    def recheck_deploys(self, inprocess):
-        self.rechecks = getattr(self, "rechecks", 0) + 1
+    def recheck_deploys(self):
+        self.rechecks += 1
         time.sleep(self.delay)
         return 1
 
@@ -349,7 +349,7 @@ class DeployRecheck(unittest.TestCase):
         r = W.Refresher(c, {}, lambda m: None)
         r.run(wait=False)
         r.deploys()
-        self.assertFalse(hasattr(c, "rechecks"))
+        self.assertEqual(c.rechecks, 0)
 
     def test_picks_only_pending_deploys_not_checked_moments_ago(self):
         C = load("fc_deploys", "fleet-cockpit")
@@ -363,7 +363,7 @@ class DeployRecheck(unittest.TestCase):
         seen = []
         C.load_ship = lambda: None
         C.ship_inprocess = lambda u: seen.append(u) or "ok"
-        self.assertEqual(C.recheck_deploys(inprocess=True), 2)
+        self.assertEqual(C.recheck_deploys(), 2)
         self.assertEqual(sorted(seen), ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"])
 
 

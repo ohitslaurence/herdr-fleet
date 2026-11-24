@@ -273,18 +273,17 @@ def ledger_records():
             yield rec
 
 
-def recheck_deploys(inprocess=False):
+def recheck_deploys():
     """Re-run ship on merged PRs still deploying or awaiting approval. Their verdict moves on
     GitHub's clock, not on a push, and the agent that merged one may have stopped waiting, so the
     watcher calls this every pass rather than leaving them to the full refresh. Returns how many
     it checked."""
     todo = sorted(rec["url"] for rec in ledger_records() if rec.get("state") in DEPLOY_PENDING
                   and age_min(rec.get("checked_at")) * 60 >= DEPLOY_RECHECK_S)
-    if inprocess and todo:
+    if todo:
         load_ship()
-    verdict = ship_inprocess if inprocess else (lambda u: run("ship", u, "--json", timeout=120))
     with ThreadPoolExecutor(8) as ex:
-        list(ex.map(verdict, todo))
+        list(ex.map(ship_inprocess, todo))
     return len(todo)
 
 

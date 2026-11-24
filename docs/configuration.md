@@ -113,7 +113,7 @@ another, `a` changes harness, `--agent` and `--model` force either.
 | `watch.human_words` | `[]` | Extra words that keep an offer with you (vendors, systems). Adds to the built-in list. |
 | `watch.blocked_minutes` | `10` | A pane blocked this long goes to the inbox. |
 | `watch.merge_lookback_hours` | `6` | On first sight, a PR merged this recently still gets announced. |
-| `watch.refresh_minutes` | `10` | How often ship re-checks open PRs for the cockpit. |
+| `watch.refresh_minutes` | `10` | How often ship re-checks open PRs for the cockpit. Merged PRs still deploying or awaiting approval are re-checked every pass instead. |
 | `watch.ntfy_topic` | `""` | Push inbox items to your phone via ntfy.sh (public topics: titles only). |
 | `watch.event_settle_s` | `3` | After an agent event, wait this long for its neighbours. |
 | `watch.event_min_gap_s` | `15` | Event-woken passes at most this often. |

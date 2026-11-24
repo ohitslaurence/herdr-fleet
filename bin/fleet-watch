@@ -15,7 +15,8 @@ An inbox item resolves itself when its pane goes back to work.
 
 Also the fleet's long-running process (fleet_serve): herdr events wake it as soon as an agent
 changes state (polling every --interval stays as the fallback, and for GitHub), it refreshes
-the cockpit's PR data in-process, and it answers the cockpit and `fleet ls` from memory over
+the cockpit's PR data in-process (every watch.refresh_minutes; merged PRs still deploying or
+awaiting approval every pass, so a finished deploy shows within one), and it answers the cockpit and `fleet ls` from memory over
 ~/.local/state/fleet/serve.sock (ops: ping, rows, refresh, inbox).
 
 Talks to panes only through herdr, so it works the same for claude and codex.
@@ -610,7 +611,9 @@ class Refresher:
 
     def deploys(self):
         """Re-check merged PRs still deploying, on its own thread; skipped while a full refresh
-        (which covers them) or a previous re-check is running."""
+        (which covers them) or a previous re-check is running. A full refresh may still start
+        during a re-check and re-read the same few PRs: a verdict is read-only and the later
+        write wins, so that costs a few GitHub calls, not correctness."""
         with self.lock:
             if self.running or self.deploys_running:
                 return
@@ -618,12 +621,13 @@ class Refresher:
 
         def work():
             try:
-                if self.cockpit.recheck_deploys(inprocess=True):
+                if self.cockpit.recheck_deploys():
                     self.collect()
             except Exception as e:
                 self.log(f"deploy re-check failed: {type(e).__name__}: {e}"[:300])
             finally:
-                self.deploys_running = False
+                with self.lock:
+                    self.deploys_running = False
         threading.Thread(target=work, daemon=True, name="deploys").start()
 
     def _work(self, done):
@@ -718,8 +722,7 @@ def cmd_watch(argv):
             else:
                 subprocess.run(["fleet-cockpit", "ls", "--refresh", "--quiet"], capture_output=True, timeout=600)
         elif refresher:
-            if not dry:
-                refresher.deploys()  # a finished deploy shows within a pass, not at the next refresh
+            refresher.deploys()  # a finished deploy shows within a pass, not at the next refresh
             try:
                 refresher.collect()
             except Exception as e:
