@@ -257,6 +257,37 @@ def ship_inprocess(url):
     return "ok"
 
 
+DEPLOY_PENDING = ("deploying", "deploy-gated")
+DEPLOY_RECHECK_S = 45  # a deploying PR's verdict is re-read at most this often
+
+
+def ledger_records():
+    """Every PR verdict ship has recorded (with a url)."""
+    for fn in os.listdir(LEDGER) if os.path.isdir(LEDGER) else []:
+        try:
+            with open(os.path.join(LEDGER, fn)) as f:
+                rec = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if rec.get("url"):
+            yield rec
+
+
+def recheck_deploys(inprocess=False):
+    """Re-run ship on merged PRs still deploying or awaiting approval. Their verdict moves on
+    GitHub's clock, not on a push, and the agent that merged one may have stopped waiting, so the
+    watcher calls this every pass rather than leaving them to the full refresh. Returns how many
+    it checked."""
+    todo = sorted(rec["url"] for rec in ledger_records() if rec.get("state") in DEPLOY_PENDING
+                  and age_min(rec.get("checked_at")) * 60 >= DEPLOY_RECHECK_S)
+    if inprocess and todo:
+        load_ship()
+    verdict = ship_inprocess if inprocess else (lambda u: run("ship", u, "--json", timeout=120))
+    with ThreadPoolExecutor(8) as ex:
+        list(ex.map(verdict, todo))
+    return len(todo)
+
+
 def refresh(quiet=False, inprocess=False):
     """Ship's read-only verdict for every open PR of mine, every pane's PR (any state), and
     merged PRs whose deploy was still running or awaiting approval. One GraphQL call fingerprints
@@ -283,17 +314,8 @@ def refresh(quiet=False, inprocess=False):
 
     # Merged PRs leave the open-PR search, and their pane may have moved on to main:
     # keep re-checking any whose deploy hadn't finished last time we looked.
-    ledger = {}
-    for fn in os.listdir(LEDGER) if os.path.isdir(LEDGER) else []:
-        try:
-            with open(os.path.join(LEDGER, fn)) as f:
-                rec = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if rec.get("url"):
-            ledger[rec["url"]] = rec
-            if rec.get("state") in ("deploying", "deploy-gated"):
-                urls.add(rec["url"])
+    ledger = {rec["url"]: rec for rec in ledger_records()}
+    urls |= {u for u, rec in ledger.items() if rec.get("state") in DEPLOY_PENDING}
 
     sigs, old = pr_signatures(urls), jload(SIGS, {})
 

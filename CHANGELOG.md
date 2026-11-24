@@ -8,6 +8,12 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: ship reported a fast deploy as still "deploying" until 5 minutes after the merge, even with
+  every run finished. A merge is now deployed as soon as the workflows its base branch always runs
+  (including chained `workflow_run` deploys) have passed; the window only waits when more may come.
+- Fix: a merged PR whose agent stopped waiting was only re-checked by the watcher's 10-minute PR
+  refresh, so "deployed" (and the notice) could come 10 minutes late. The watcher now re-checks
+  deploying and approval-gated PRs every pass.
 - New: `fleet gripe "<what went wrong>"` logs friction an agent hit (with `--tried`, `--cost`, `--fix`,
   `--about`; pane, kind, repo, branch and orch worker filled in), redacted, to
   `~/.local/state/fleet/gripes.jsonl` on this machine. `fleet gripes` reads them grouped by topic; the

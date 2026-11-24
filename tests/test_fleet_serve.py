@@ -4,6 +4,8 @@ the pane set changes, survives a hostile stream). Plus the hardening around it f
 the watch's Refresher, timeouts, and the cockpit's in-process ship."""
 import importlib.machinery, importlib.util, json, os, socket, stat, sys, tempfile, threading, time, unittest
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin")
@@ -283,6 +285,11 @@ class FakeCockpit:
     def collect(self):
         return {"rows": [], "n": self.refreshes}
 
+    def recheck_deploys(self, inprocess):
+        self.rechecks = getattr(self, "rechecks", 0) + 1
+        time.sleep(self.delay)
+        return 1
+
 
 class RefresherTests(unittest.TestCase):
     def setUp(self):
@@ -320,6 +327,44 @@ class RefresherTests(unittest.TestCase):
                 r.run()
         self.assertIsNone(r.run(wait=False))
         self.assertEqual(c.refreshes, 1)  # one attempt, then the failure answers for FRESH_S
+
+
+class DeployRecheck(unittest.TestCase):
+    def test_runs_off_the_loop_and_collects_once_done(self):
+        W = load("fw_deploys", "fleet-watch")
+        c = FakeCockpit(delay=0.3)
+        r = W.Refresher(c, {}, lambda m: None)
+        t = time.time()
+        r.deploys()
+        r.deploys()  # one already going: not doubled
+        self.assertLess(time.time() - t, 0.2)
+        deadline = time.time() + 5
+        while r.deploys_running and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual((c.rechecks, r.rows["n"]), (1, 0))
+
+    def test_skipped_while_a_full_refresh_covers_it(self):
+        W = load("fw_deploys2", "fleet-watch")
+        c = FakeCockpit(delay=0.5)
+        r = W.Refresher(c, {}, lambda m: None)
+        r.run(wait=False)
+        r.deploys()
+        self.assertFalse(hasattr(c, "rechecks"))
+
+    def test_picks_only_pending_deploys_not_checked_moments_ago(self):
+        C = load("fc_deploys", "fleet-cockpit")
+        C.LEDGER = tempfile.mkdtemp()
+        old = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        new = datetime.now(timezone.utc).isoformat()
+        for n, state, at in ((1, "deploying", old), (2, "deploy-gated", old), (3, "deploying", new),
+                             (4, "deployed", old), (5, "ci-running", old)):
+            Path(C.LEDGER, f"o__r__{n}.json").write_text(json.dumps(
+                {"url": f"https://github.com/o/r/pull/{n}", "state": state, "checked_at": at}))
+        seen = []
+        C.load_ship = lambda: None
+        C.ship_inprocess = lambda u: seen.append(u) or "ok"
+        self.assertEqual(C.recheck_deploys(inprocess=True), 2)
+        self.assertEqual(sorted(seen), ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"])
 
 
 class InProcessShip(unittest.TestCase):

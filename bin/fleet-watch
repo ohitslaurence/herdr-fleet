@@ -579,6 +579,7 @@ class Refresher:
         self.lock = threading.Lock()
         self.running, self.finished, self.error = None, 0.0, None
         self.rows = None
+        self.deploys_running = False
 
     def collect(self):
         self.rows = dict(self.cockpit.collect(), collected_at=iso(now()))
@@ -606,6 +607,24 @@ class Refresher:
         if self.error:
             raise RuntimeError(f"refresh failed: {self.error}")
         return self.rows
+
+    def deploys(self):
+        """Re-check merged PRs still deploying, on its own thread; skipped while a full refresh
+        (which covers them) or a previous re-check is running."""
+        with self.lock:
+            if self.running or self.deploys_running:
+                return
+            self.deploys_running = True
+
+        def work():
+            try:
+                if self.cockpit.recheck_deploys(inprocess=True):
+                    self.collect()
+            except Exception as e:
+                self.log(f"deploy re-check failed: {type(e).__name__}: {e}"[:300])
+            finally:
+                self.deploys_running = False
+        threading.Thread(target=work, daemon=True, name="deploys").start()
 
     def _work(self, done):
         err = None
@@ -699,6 +718,8 @@ def cmd_watch(argv):
             else:
                 subprocess.run(["fleet-cockpit", "ls", "--refresh", "--quiet"], capture_output=True, timeout=600)
         elif refresher:
+            if not dry:
+                refresher.deploys()  # a finished deploy shows within a pass, not at the next refresh
             try:
                 refresher.collect()
             except Exception as e:
