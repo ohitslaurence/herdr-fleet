@@ -17,11 +17,12 @@ def run(name, status="completed", conclusion="success", minutes=10, event="push"
             "createdAt": ago(minutes)}
 
 
-def history(*workflow_sets):
+def history(*workflow_sets, event="push"):
     """Past pushes to the base, newest first, each running the given workflows."""
     out = []
     for i, names in enumerate(workflow_sets):
-        out += [{"workflowName": n, "headSha": f"p{i}", "createdAt": ago(60 * (i + 1))} for n in names]
+        out += [{"workflowName": n, "headSha": f"p{i}", "createdAt": ago(60 * (i + 1)), "event": event}
+                for n in names]
     return out
 
 
@@ -67,6 +68,25 @@ class Actions(unittest.TestCase):
 
     def test_young_merge_waits(self):
         self.assertEqual(self.status([], self.ALWAYS_DEPLOY, merged_min=1)[0], "deploying")
+
+    def test_young_merge_whose_expected_runs_all_passed_is_deployed(self):
+        # a fast deploy is done when it's done, not START_MIN after the merge
+        self.assertEqual(self.status([run("CI", minutes=0), run("Deploy", minutes=0)], self.ALWAYS_DEPLOY,
+                                     merged_min=1), ("deployed", "CI, Deploy"))
+
+    def test_young_merge_waits_while_an_expected_workflow_hasnt_started(self):
+        self.assertEqual(self.status([run("CI", minutes=0)], self.ALWAYS_DEPLOY, merged_min=1)[0], "deploying")
+        # and with no history to say what's expected, the window still waits
+        self.assertEqual(self.status([run("CI", minutes=0)], history(["CI"]), merged_min=1)[0], "deploying")
+
+    def test_chained_deploy_is_expected(self):
+        # Deploy starts from CI by workflow_run: still expected, so a young merge waits for it
+        h = history(*[["CI"]] * D.HISTORY_PUSHES) + history(*[["Deploy"]] * D.HISTORY_PUSHES, event="workflow_run")
+        self.assertEqual(self.status([run("CI", minutes=0)], h, merged_min=1)[0], "deploying")
+        self.assertEqual(self.status([run("CI"), run("Deploy", event="workflow_run")], h, merged_min=1)[0],
+                         "deployed")
+        prs = history(*[["Lint"]] * D.HISTORY_PUSHES, event="pull_request")  # not post-merge: ignored
+        self.assertEqual(self.status([run("CI"), run("Deploy", event="workflow_run")], h + prs)[0], "deployed")
 
     def test_running_failed_gated_and_slow(self):
         self.assertEqual(self.status([run("Deploy", "in_progress", None, 5)], self.ALWAYS_DEPLOY)[0], "deploying")

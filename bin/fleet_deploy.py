@@ -10,8 +10,10 @@ status(o, r, sha, merged_at, base) -> (state, detail), state one of:
                  run has been going far longer than deploys take
 
 "actions" (GitHub Actions) learns what to expect from the base branch's history: workflows that
-ran on every one of the last few pushes to it. "Nothing started within a minute" used to count
-as deployed; now it only does when the base branch has no such always-run workflows.
+ran on every one of the last few pushes to it, including ones a push starts indirectly
+(workflow_run, deployment). A merge is deployed as soon as those have all run and passed; the
+START_MIN window after a merge only waits when it can't tell (no runs yet, no history, or an
+expected workflow hasn't started).
 """
 import json, os, sys, time
 from datetime import datetime, timezone
@@ -55,10 +57,11 @@ class Actions:
         if hit and time.time() - hit["at"] < 3600:
             runs = hit["runs"]
         else:
-            runs = gh_json("run", "list", "-R", f"{o}/{r}", "--branch", base, "--event", "push", "-L", "100",
-                           "--json", "workflowName,headSha,createdAt")
+            runs = gh_json("run", "list", "-R", f"{o}/{r}", "--branch", base, "-L", "100",
+                           "--json", "workflowName,headSha,createdAt,event")
             if runs is None:
                 return None
+            runs = [x for x in runs if x.get("event") in EVENTS]
             c[key] = {"at": time.time(), "runs": runs}
             os.makedirs(os.path.dirname(cache), exist_ok=True)
             tmp = cache + ".tmp"
@@ -98,10 +101,10 @@ class Actions:
                                    + "; ".join(f"{x['name']} {x['url']}" for x in slow))
         if running:
             return "deploying", ", ".join(x["name"] for x in running)
-        if young:
-            return "deploying", "merged moments ago; waiting for post-merge workflows to start"
         expected = self.expected(o, r, base, sha, merged_at) if base else None
         missing = sorted((expected or set()) - {x["name"] for x in runs})
+        if young and (not runs or expected is None or missing):  # more may still start
+            return "deploying", "merged moments ago; waiting for post-merge workflows to start"
         if missing:
             return "needs-human", (f"{', '.join(missing)} ran on each of the last {self.history} pushes to {base} but "
                                    f"never started on this merge ({self.start_min}+ min)")
