@@ -462,9 +462,51 @@ def free_review_attempts(repo_full, n):
         return []
 
 
-def deploy_of(o, r, sha, merged_at, base, pol):
-    """Post-merge state from the configured deploy provider (fleet_deploy)."""
+STACK_DEPTH = 5  # a stack taller than this is checked against its top branch only
+
+
+_DEFAULT_BRANCH = {}
+
+
+def default_branch(o, r):
+    """Cached for the process: the watcher keeps ship loaded and asks on every deploy check."""
+    if (o, r) not in _DEFAULT_BRANCH:
+        d = gh_json("api", f"repos/{o}/{r}", "--jq", "{b: .default_branch}")
+        _DEFAULT_BRANCH[(o, r)] = (d or {}).get("b")
+    return _DEFAULT_BRANCH[(o, r)]
+
+
+def carrier_of(o, r, base, merged_at):
+    """The PR that takes branch `base` onward, as of a merge into it at `merged_at`: an open
+    one, else the first to merge after it, else the last that merged before it (the merge
+    came too late), else a closed one. None: no PR has `base` as its head (a long-lived branch)."""
+    prs = gh_json("pr", "list", "-R", f"{o}/{r}", "--head", base, "--state", "all", "-L", "20",
+                  "--json", "number,state,mergedAt,mergeCommit,baseRefName") or []
+    by = lambda s: sorted((p for p in prs if p["state"] == s), key=lambda p: p.get("mergedAt") or "")
+    merged = by("MERGED")
+    return next(iter(by("OPEN")), None) or next((p for p in merged if p["mergedAt"] >= merged_at), None) \
+        or (merged[-1] if merged else None) or next(iter(by("CLOSED")), None)
+
+
+def deploy_of(o, r, sha, merged_at, base, pol, depth=0):
+    """Post-merge state from the configured deploy provider (fleet_deploy). A stacked PR's code
+    reaches the default branch only through the PR whose head is its base: follow that one."""
     import fleet_deploy
+    default = default_branch(o, r) if base and merged_at and depth < STACK_DEPTH else None
+    if default and base != default:
+        c = carrier_of(o, r, base, merged_at)
+        if c:
+            n = c["number"]
+            if c["state"] == "OPEN":
+                return "deployed", f"merged into {base}; reaches {default} when #{n} merges, and its ship run watches that deploy"
+            if c["state"] == "CLOSED":
+                return "needs-human", (f"merged into {base}, but #{n}, which would take {base} to {default}, was "
+                                       f"closed unmerged: this code isn't on {default}")
+            if c["mergedAt"] < merged_at:
+                return "needs-human", (f"merged into {base} after #{n} had already taken {base} to {default}, so this "
+                                       f"code never reached {default}: open a PR from this branch to {default}")
+            st, why = deploy_of(o, r, c["mergeCommit"]["oid"], c["mergedAt"], c["baseRefName"], pol, depth + 1)
+            return st, f"via #{n}: {why}"
     return fleet_deploy.provider(pol["deploy"], STATE_DIR, pol).status(o, r, sha, merged_at, base)
 
 
