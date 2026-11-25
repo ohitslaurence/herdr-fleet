@@ -8,6 +8,11 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: a new worktree's setup ran the wrong package manager when a repo carried a stray lockfile
+  (yarn in an npm repo); package.json's `packageManager` now decides. New `[setup] after` steps run
+  once the install is done; the default runs `sst install` where there's an `sst.config.ts`, so
+  infra typechecks work in fresh worktrees. `node_modules/.fleet-ready` is now written even when
+  setup fails, holding its exit status, so agents stop waiting for a marker that never comes.
 - Fix: ship reported a fast deploy as still "deploying" until 5 minutes after the merge, even with
   every run finished. A merge is now deployed as soon as the workflows its base branch always runs
   (including chained `workflow_run` deploys) have passed; the window only waits when more may come.

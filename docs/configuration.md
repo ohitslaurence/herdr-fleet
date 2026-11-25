@@ -40,7 +40,8 @@ layers. Per-repo ship overrides go in `[repos.<name>]` with the same keys as `[s
 | `dev.repos.<alias>` | none | `path = "..."` (and optionally `base = "main"`): a repo outside `repos_dir`, a different name, or a different base branch. Wins over the scanned one. |
 | `dev.warm_caches` | `[]` | Gitignored build-cache dirs, relative to the repo, that a new worktree copies from whichever other worktree of the repo wrote them last, e.g. `[".cache/typecheck"]`, so its first incremental build or typecheck starts warm instead of cold. A dir the worktree already has is left alone; a `fleet new` spare re-copies on every refresh (what it copied is in its spare state as `warmed`). Entries must be paths inside the repo. |
 | `layout.tabs` | `["shell", "agent"]` | Tabs a new session opens with; `agent` runs the agent. |
-| `setup.installs` | bun, pnpm, yarn, npm | `[lockfile, command]` pairs; the first lockfile found picks the install command. |
+| `setup.installs` | bun, pnpm, yarn, npm | `[lockfile, command]` pairs. Among the lockfiles present, the one whose command starts with package.json's `packageManager` wins (a repo can carry a stray lockfile); else the first found. |
+| `setup.after` | `[["sst.config.ts", "node_modules/.bin/sst install"]]` | `[file, command]` steps run after the install when the file exists, e.g. generating SST's platform types, which a typecheck needs. `fleet new` writes the whole setup's exit status to `node_modules/.fleet-ready`, pass or fail. |
 | `spares.repos` | `[]` | Repos that keep one ready worktree, so `fleet new` starts in about a second. Costs a full checkout plus dependencies on disk each. |
 | `spares.refresh_minutes` | `20` | How often fleet watch refreshes the spares. |
 | `new.classifier` | `"auto"` | How `fleet new` reads a sentence: `auto` (the first with a key: jev, decisions, then haiku), `jev`, `decisions`, `haiku`. `FLEET_CLASSIFIER` overrides once. |

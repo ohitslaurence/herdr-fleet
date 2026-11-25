@@ -181,5 +181,15 @@ class FirstInstruction(unittest.TestCase):
         self.assertNotIn(N.SETUP_NOTE, " ".join(N.launch_cmd("codex", None, "fix it", send=False, installing=True)))
 
 
+class SetupMarker(unittest.TestCase):
+    def test_marker_holds_each_setups_exit_status_even_when_one_fails(self):
+        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+        line = N.install_steps([(a, "sh -c 'exit 3'"), (b, "true")])
+        subprocess.run(["sh", "-c", line], check=False)
+        for wt, want in ((a, "3"), (b, "0")):
+            with open(os.path.join(wt, "node_modules", ".fleet-ready")) as f:
+                self.assertEqual(f.read().strip(), want)
+
+
 if __name__ == "__main__":
     unittest.main()

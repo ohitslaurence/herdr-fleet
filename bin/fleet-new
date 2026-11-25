@@ -23,7 +23,7 @@ Spares: repos listed in [spares] repos (fleet config) keep one ready worktree
 (<repos dir>/.spares/<repo>, fetched, seeded, deps installed). A new session takes it
 (git worktree move + branch rename, ~1 s) and a fresh spare builds in the background.
 Without a spare, `dev` makes the worktree, the install runs in the shell tab, and the
-agent starts at once, told to wait for node_modules/.fleet-ready before tests or builds.
+agent starts at once, told to wait for node_modules/.fleet-ready (the setup's exit status) before tests or builds.
 """
 import difflib, json, os, re, shlex, subprocess, sys, time
 from pathlib import Path
@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
 import fleet_proc  # noqa: E402
-from fleet_paths import NO_HOOKS, branch_name, count_worktrees, warm_caches, worktree_path  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, count_worktrees, install_command, warm_caches, worktree_path  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
 NOTES = os.path.join(STATE_DIR, "notes.json")
@@ -78,7 +78,8 @@ def agent_argv(kind, model=None):
 
 
 SETUP_NOTE = ("Setup: dependencies are still installing in this workspace's `shell` tab. Before running tests, "
-              "builds or type checks, wait until node_modules/.fleet-ready exists.")
+              "builds or type checks, wait until node_modules/.fleet-ready exists. It holds the setup's exit "
+              "status: if that isn't 0, read the shell tab and fix the install before going on.")
 
 
 def launch_cmd(kind, model, text, send, installing):
@@ -529,7 +530,15 @@ def open_sessions():
 
 
 def install_cmd(path):
-    return next((cmd for f, cmd in lockfiles() if os.path.exists(os.path.join(path, f))), None)
+    return install_command(path)
+
+
+def install_steps(installs):
+    """One shell line running each (worktree, command) setup. Each worktree's marker is written
+    whether its setup passed or not, holding the exit status, so an agent waiting on it learns of
+    a failure instead of waiting for good."""
+    return "; ".join(f"(cd {shlex.quote(wt)} && {{ {cmd}; s=$?; mkdir -p node_modules; "
+                     f"echo $s > node_modules/.fleet-ready; }})" for wt, cmd in installs)
 
 
 def lock_hash(path):
@@ -961,9 +970,7 @@ def main(argv):
         die(f"worktree made at {primary} but no herdr workspace found for it")
     shell = tab_pane(ws, "shell")
     if installs and shell:
-        steps = " && ".join(f"(cd {shlex.quote(wt)} && {cmd} && touch node_modules/.fleet-ready)"
-                            for wt, cmd in installs)
-        run("herdr", "pane", "run", shell, steps)
+        run("herdr", "pane", "run", shell, install_steps(installs))
     agent_tab = find_tab(ws, "agent")
     pane = pane_of(agent_tab)
     if pane and "--no-agent" not in flags:

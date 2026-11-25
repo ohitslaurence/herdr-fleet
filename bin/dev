@@ -15,7 +15,8 @@ import json, os, re, shlex, shutil, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 # Worktree paths and branch names come from templates (~/.config/fleet/config.toml); the
 # defaults are the historical <repo-path>-wt-<task> and <repo>__<task>.
-from fleet_paths import NO_HOOKS, branch_name, branch_task, dev_owned, pr_worktree_path, warm_caches  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, branch_task, dev_owned, install_command, pr_worktree_path  # noqa: E402
+from fleet_paths import warm_caches  # noqa: E402
 from fleet_paths import worktree_path as worktree_path_of  # noqa: E402
 from dataclasses import dataclass
 from typing import NamedTuple, NoReturn
@@ -25,11 +26,6 @@ ADD_REPO = ("set [dev] repos_dir to the folder your checkouts live in, or add [d
             "in ~/.config/fleet/config.toml")
 LABEL_SEP = "__"
 import fleet_config  # noqa: E402
-
-
-def lockfile_commands():
-    """[(lockfile, argv)] in order: [setup] installs in the fleet config, shared with fleet new."""
-    return [(f, shlex.split(cmd)) for f, cmd in fleet_config.get("setup", "installs", [])]
 
 
 def default_tabs():
@@ -555,17 +551,14 @@ def bootstrap_worktree(worktree_path: str, alias: str = ""):
         print("bootstrap: DEV_SKIP_INSTALL=1, leaving the install to the caller")
         return
 
-    for file, cmd in lockfile_commands():
-        if os.path.exists(os.path.join(resolved, file)):
-            print(f"bootstrap: found {file}, running {' '.join(cmd)}")
-            sys.stdout.flush()
-            try:
-                status = str(subprocess.run(cmd, cwd=resolved).returncode)
-            except OSError:
-                status = "null"  # Node's spawnSync status for a missing binary
-            if status != "0":
-                print(f"bootstrap: {' '.join(cmd)} failed (exit {status})", file=sys.stderr)
-            return
+    cmd = install_command(resolved)
+    if cmd:
+        print(f"bootstrap: running {cmd}")
+        sys.stdout.flush()
+        status = subprocess.run(cmd, shell=True, cwd=resolved).returncode
+        if status != 0:
+            print(f"bootstrap: {cmd} failed (exit {status})", file=sys.stderr)
+        return
 
     print(f"bootstrap: no lockfile found in {resolved}, nothing to do")
 

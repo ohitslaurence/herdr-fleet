@@ -23,7 +23,7 @@ CLI (for shell tools like orch):
   fleet_paths.py worktree <repo_path> <alias> <task>
   fleet_paths.py branch <alias> <task>
 """
-import getpass, os, re, shutil, subprocess, sys
+import getpass, json, os, re, shutil, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
@@ -174,6 +174,26 @@ def is_linked_worktree(path):
         return False
     lines = p.stdout.split()
     return p.returncode == 0 and len(lines) == 2 and os.path.realpath(lines[0]) != os.path.realpath(lines[1])
+
+
+def install_command(path):
+    """The shell command that sets up dependencies in the checkout at `path`, or None.
+    [setup] installs maps lockfiles to commands. A repo can carry a stray lockfile (a yarn.lock
+    beside package-lock.json), so package.json's packageManager wins among the ones present; else
+    the first in config order. Then each [setup] after step whose file exists, such as generating
+    SST's platform types, which a typecheck needs and nothing else creates."""
+    found = [(f, cmd) for f, cmd in fleet_config.get("setup", "installs", [])
+             if os.path.exists(os.path.join(path, f))]
+    if not found:
+        return None
+    try:
+        with open(os.path.join(path, "package.json")) as fh:
+            pm = str(json.load(fh).get("packageManager") or "").split("@")[0]
+    except (OSError, ValueError, AttributeError):
+        pm = ""
+    install = next((cmd for _, cmd in found if pm and cmd.split()[0] == pm), found[0][1])
+    after = [cmd for f, cmd in fleet_config.get("setup", "after", []) if os.path.exists(os.path.join(path, f))]
+    return " && ".join([install, *after])
 
 
 def warm_caches(path, replace=False):
