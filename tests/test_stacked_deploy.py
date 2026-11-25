@@ -5,7 +5,7 @@ import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 from facts import load_ship  # noqa: E402
-import fleet_deploy  # noqa: E402
+import fleet_deploy, fleet_proc  # noqa: E402
 
 
 def pr(n, state, merged_at=None, base="main"):
@@ -18,16 +18,16 @@ class StackedDeploy(unittest.TestCase):
         self.ship = load_ship()
         self.heads = {}     # branch -> PRs with that head
         self.watched = []   # (sha, base) the deploy provider was asked about
-        self.gh_calls = []
 
         def gh_json(*args):
-            self.gh_calls.append(args)
-            if args[:2] == ("api", "repos/o/r"):
-                return {"b": "main"}
             if args[:2] == ("pr", "list"):
                 return self.heads.get(args[args.index("--head") + 1], [])
             raise AssertionError(f"unexpected gh call {args}")
         self.ship.gh_json = gh_json
+        real_default = fleet_proc.default_branch
+        fleet_proc.default_branch = lambda o, r: self.default
+        self.addCleanup(setattr, fleet_proc, "default_branch", real_default)
+        self.default = "main"
 
         test = self
 
@@ -64,12 +64,18 @@ class StackedDeploy(unittest.TestCase):
         self.assertEqual(self.deploy("feat-b"), ("deployed", "via #6: via #5: Deploy"))
         self.assertEqual(self.watched, [("sha5", "main")])
 
-    def test_base_pr_still_open_is_done_here_and_names_the_pr_that_carries_it(self):
+    def test_base_pr_still_open_is_its_own_state_naming_the_pr_that_carries_it(self):
         self.heads["feat-a"] = [pr(4, "MERGED", "2026-11-19T09:00:00Z"), pr(5, "OPEN")]
         st, why = self.deploy("feat-a")
-        self.assertEqual(st, "deployed")
+        self.assertEqual(st, "merged-into-base")
         self.assertIn("when #5 merges", why)
         self.assertEqual(self.watched, [])
+
+    def test_the_first_base_pr_merged_after_the_merge_carries_it(self):
+        self.heads["feat-a"] = [pr(7, "MERGED", "2026-11-20T15:00:00Z"), pr(4, "MERGED", "2026-11-19T09:00:00Z"),
+                                pr(6, "MERGED", "2026-11-20T11:00:00Z"), pr(3, "CLOSED")]
+        self.assertEqual(self.deploy("feat-a"), ("deployed", "via #6: Deploy"))
+        self.assertEqual(self.watched, [("sha6", "main")])
 
     def test_base_pr_closed_unmerged_needs_a_human(self):
         self.heads["feat-a"] = [pr(5, "CLOSED")]
@@ -81,10 +87,39 @@ class StackedDeploy(unittest.TestCase):
         self.assertEqual(self.deploy("staging"), ("deployed", "Deploy"))
         self.assertEqual(self.watched, [("child", "staging")])
 
-    def test_the_default_branch_is_looked_up_once_per_repo(self):
-        self.deploy("main")
-        self.deploy("main")
-        self.assertEqual(sum(a[:2] == ("api", "repos/o/r") for a in self.gh_calls), 1)
+    def test_a_cycle_of_branches_stops_at_the_depth_limit(self):
+        self.heads["feat-a"] = [pr(5, "MERGED", "2026-11-20T11:00:00Z", base="feat-b")]
+        self.heads["feat-b"] = [pr(6, "MERGED", "2026-11-20T11:00:00Z", base="feat-a")]
+        st, why = self.deploy("feat-a")
+        self.assertEqual(st, "needs-human")
+        self.assertIn("check by hand", why)
+        self.assertEqual(self.watched, [])
+
+    def test_an_unreadable_default_branch_is_an_error_not_a_guess(self):
+        self.default = None
+        with self.assertRaises(RuntimeError):
+            self.deploy("feat-a")
+
+    def test_the_new_state_is_terminal_and_documented_for_agents(self):
+        self.assertIn("merged-into-base", self.ship.TERMINAL)
+        skill = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "ship", "SKILL.md")).read()
+        self.assertIn("| `merged-into-base` |", skill)
+
+
+class DefaultBranch(unittest.TestCase):
+    def test_asked_once_per_repo_and_a_failure_is_not_remembered(self):
+        answers, calls = [None, "main\n"], []
+
+        def gh_text(*args, timeout=None):
+            calls.append(args)
+            return answers.pop(0) if answers else "other\n"
+        real, fleet_proc.gh_text = fleet_proc.gh_text, gh_text
+        self.addCleanup(setattr, fleet_proc, "gh_text", real)
+        fleet_proc._DEFAULT_BRANCH.pop(("x", "y"), None)
+        self.assertIsNone(fleet_proc.default_branch("x", "y"))
+        self.assertEqual(fleet_proc.default_branch("x", "y"), "main")
+        self.assertEqual(fleet_proc.default_branch("x", "y"), "main")
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

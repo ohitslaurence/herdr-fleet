@@ -52,7 +52,7 @@ LEVELS = [f"Noise: nothing for {USER} to do, or purely informational.",
 
 NEEDS = ("needs-human", "churn", "deploy-failed", "deploy-gated")
 READY = ("awaiting-human", "mergeable")
-FINISHED = ("deployed", "closed")
+FINISHED = ("deployed", "merged-into-base", "closed")
 SECTIONS = ("NEEDS YOU", "READY TO MERGE", "IN FLIGHT", "NO AGENT", "IDLE", "BACKLOG")
 HUMAN_SECTIONS = ("NEEDS YOU", "READY TO MERGE")  # the rows that wait on a person
 

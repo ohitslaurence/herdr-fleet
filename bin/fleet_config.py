@@ -528,8 +528,8 @@ def cmd_show(args):
         if not (owner and name):
             sys.exit("fleet config show --repo owner/name[@base]")
         if not base:
-            base = subprocess.run(["gh", "api", f"repos/{owner}/{name}", "--jq", ".default_branch"],
-                                  capture_output=True, text=True).stdout.strip() or "main"
+            import fleet_proc
+            base = fleet_proc.default_branch(owner, name) or "main"
         pol = ship_policy(name, owner, base)
         ignored += [(k, f"repo {owner}/{name}@{base}", why) for k, why in pol.pop("repo_file_ignored")]
     if as_json:
