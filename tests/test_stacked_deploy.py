@@ -102,7 +102,8 @@ class StackedDeploy(unittest.TestCase):
 
     def test_the_new_state_is_terminal_and_documented_for_agents(self):
         self.assertIn("merged-into-base", self.ship.TERMINAL)
-        skill = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "ship", "SKILL.md")).read()
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "ship", "SKILL.md")) as f:
+            skill = f.read()
         self.assertIn("| `merged-into-base` |", skill)
 
 
