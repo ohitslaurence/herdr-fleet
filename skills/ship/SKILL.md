@@ -139,8 +139,9 @@ Once every finding has a verdict, `ship --act --wait` continues and marks the PR
 | state | what you do |
 |---|---|
 | `deployed` | If `next:` says to run after_deploy, run `ship --act` first (your config's post-deploy command; it runs once). Tell the user in one line: PR, merged, deployed. Then stop. Don't run or offer `dev done`: it closes this pane and worktree, and the user does that from the cockpit. |
+| `merged-into-base` | A stacked PR merged into its base branch, whose own PR (named in `detail:`) takes it to the default branch and watches that deploy. One line: PR, merged into which branch, carried by which PR. Then stop. |
 | `awaiting-human` | Clean and green, but policy needs a human merge. One line: PR URL + why. |
-| `needs-human` | Budget spent or review didn't converge. Summarise what's still open in ≤5 lines and ask one question. |
+| `needs-human` | Budget spent or review didn't converge, or after a merge something expected didn't happen (`detail:` says what: a workflow that never started, or a stacked PR whose code never reached the default branch because its base PR had already merged or was closed). Summarise what's still open in ≤5 lines and ask one question. |
 | `deploy-gated` | A deploy waits for environment approval. Say so with the run URL. |
 | `deploy-failed` | Investigate the failed run; report. Never push to main to fix it. |
 | `closed` | Say so. |

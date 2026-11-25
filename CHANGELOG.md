@@ -8,6 +8,10 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: a stacked PR (merged into another PR's branch) was reported "deployed" from its own merge,
+  even when that branch had already merged and the code never reached main. ship now follows the
+  PR whose head is the base: deployed via that PR's deploy, the new terminal state
+  `merged-into-base` while that PR is open, and needs-human when it merged first or was closed.
 - Fix: ship reported a fast deploy as still "deploying" until 5 minutes after the merge, even with
   every run finished. A merge is now deployed as soon as the workflows its base branch always runs
   (including chained `workflow_run` deploys) have passed; the window only waits when more may come.

@@ -54,7 +54,7 @@ WAITING = {"ci-running", "review-pending", "deploying", "cross-reviewing"}
 WAIT_DEFAULT_S = 540
 AFTER_DEPLOY_TIMEOUT_S = 600
 AFTER_DEPLOY_TAIL = 300  # characters of a failed run's output kept in the ledger
-TERMINAL = {"churn", "deployed", "awaiting-human", "needs-human", "closed", "deploy-failed", "deploy-gated"}
+TERMINAL = {"churn", "deployed", "merged-into-base", "awaiting-human", "needs-human", "closed", "deploy-failed", "deploy-gated"}
 
 
 
@@ -462,9 +462,48 @@ def free_review_attempts(repo_full, n):
         return []
 
 
-def deploy_of(o, r, sha, merged_at, base, pol):
-    """Post-merge state from the configured deploy provider (fleet_deploy)."""
+STACK_DEPTH = 5  # stacks taller than this (or a cycle of branches) go to a human
+
+
+def carrier_of(o, r, base, merged_at):
+    """The PR that takes branch `base` onward, for a merge into it at `merged_at`, or None when no
+    PR has `base` as its head (a long-lived branch, watched directly)."""
+    prs = gh_json("pr", "list", "-R", f"{o}/{r}", "--head", base, "--state", "all", "-L", "20",
+                  "--json", "number,state,mergedAt,mergeCommit,baseRefName") or []
+    merged = sorted((p for p in prs if p["state"] == "MERGED"), key=lambda p: p["mergedAt"])
+    opened = [p for p in prs if p["state"] == "OPEN"]
+    if opened:                                    # it will carry the merge when it lands
+        return opened[0]
+    for p in merged:                              # the first to land after the merge carried it
+        if p["mergedAt"] >= merged_at:
+            return p
+    if merged:                                    # every one landed before: the merge came too late
+        return merged[-1]
+    return next((p for p in prs if p["state"] == "CLOSED"), None)
+
+
+def deploy_of(o, r, sha, merged_at, base, pol, depth=0):
+    """Post-merge state from the configured deploy provider (fleet_deploy). A stacked PR's code
+    reaches the default branch only through the PR whose head is its base: follow that one."""
     import fleet_deploy
+    default = proc.default_branch(o, r) if base and merged_at else None
+    if base and merged_at and not default:
+        raise RuntimeError(f"can't read {o}/{r}'s default branch")
+    c = carrier_of(o, r, base, merged_at) if default and base != default else None
+    if c:
+        n = c["number"]
+        if depth >= STACK_DEPTH:
+            return "needs-human", f"a stack of more than {STACK_DEPTH} branches above {default}; check by hand where #{n} landed"
+        if c["state"] == "OPEN":
+            return "merged-into-base", f"merged into {base}; reaches {default} when #{n} merges, and its ship run watches that deploy"
+        if c["state"] == "CLOSED":
+            return "needs-human", (f"merged into {base}, but #{n}, which would take {base} to {default}, was "
+                                   f"closed unmerged: this code isn't on {default}")
+        if c["mergedAt"] < merged_at:
+            return "needs-human", (f"merged into {base} after #{n} had already taken {base} to {default}, so this "
+                                   f"code never reached {default}: open a PR from this branch to {default}")
+        st, why = deploy_of(o, r, c["mergeCommit"]["oid"], c["mergedAt"], c["baseRefName"], pol, depth + 1)
+        return st, f"via #{n}: {why}"
     return fleet_deploy.provider(pol["deploy"], STATE_DIR, pol).status(o, r, sha, merged_at, base)
 
 
@@ -548,6 +587,7 @@ def decide(f, now):
         except RuntimeError as e:
             die(f"deploy: {e}")
         nxt = {"deployed": "done: merged and deployed. Tell the user in one line and stop. Never run or offer `dev done`: closing the context is the user's.",
+               "merged-into-base": "done: merged into its base branch, whose own PR takes it to the default branch and watches that deploy. Tell the user in one line (detail names that PR) and stop.",
                "deploying": "wait: `ship --wait`",
                "deploy-gated": "human: a deploy is waiting for environment approval in GitHub",
                "deploy-failed": "investigate the failed post-merge run(s), report to the user; do not push to main",
@@ -1034,7 +1074,7 @@ def show(s, as_json):
     if s.get("acted"):
         print(f"  did: {s['acted']}")
     print(f"next: {s['next']}")
-    if s["state"] not in ("deployed", "closed") and on_branch(s.get("branch")) and not has_note(worktree_root()):
+    if s["state"] not in ("deployed", "merged-into-base", "closed") and on_branch(s.get("branch")) and not has_note(worktree_root()):
         print('also: describe this workstream for the cockpit, one sentence, what and why: `fleet note "..."`')
 
 
