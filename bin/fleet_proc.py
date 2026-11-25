@@ -51,6 +51,20 @@ def gh_json(*args, timeout=None):
         return None
 
 
+_DEFAULT_BRANCH = {}
+
+
+def default_branch(owner, name):
+    """The repo's default branch from GitHub, None if gh can't say. Remembered for the process:
+    it practically never changes, and the watcher keeps ship loaded and asks on every deploy check."""
+    if (owner, name) not in _DEFAULT_BRANCH:
+        b = (gh_text("api", f"repos/{owner}/{name}", "--jq", ".default_branch") or "").strip()
+        if not b:
+            return None
+        _DEFAULT_BRANCH[(owner, name)] = b
+    return _DEFAULT_BRANCH[(owner, name)]
+
+
 def herdr(*args, timeout=10):
     """Run a herdr command; HerdrDown (with herdr's own reason) if it can't."""
     try:
