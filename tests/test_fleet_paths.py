@@ -154,6 +154,59 @@ class WarmCaches(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(fresh, ".cache")))
 
 
+class InstallCommand(unittest.TestCase):
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        real = fleet_config.PATH
+        fleet_config.PATH = os.path.join(self.root, "config.toml")
+        fleet_config._cache.clear()
+        self.addCleanup(lambda: (setattr(fleet_config, "PATH", real), fleet_config._cache.clear()))
+
+    def files(self, *names, package=None):
+        for n in names:
+            open(os.path.join(self.root, n), "w").close()
+        if package is not None:
+            with open(os.path.join(self.root, "package.json"), "w") as f:
+                f.write(package)
+
+    def test_the_first_lockfile_in_config_order(self):
+        self.files("yarn.lock", "package-lock.json")
+        self.assertEqual(P.setup_command(self.root), "yarn install")
+
+    def test_package_manager_beats_a_stray_lockfile(self):
+        self.files("yarn.lock", "package-lock.json", package='{"packageManager": "npm@11.7.0"}')
+        self.assertEqual(P.setup_command(self.root), "npm ci")
+
+    def test_a_package_manager_without_its_lockfile_or_a_bad_package_json_falls_back(self):
+        self.files("yarn.lock", package='{"packageManager": "pnpm@9"}')
+        self.assertEqual(P.setup_command(self.root), "yarn install")
+        self.files(package="[not json")
+        self.assertEqual(P.setup_command(self.root), "yarn install")
+        self.files(package="[]")
+        self.assertEqual(P.setup_command(self.root), "yarn install")
+
+    def test_after_steps_run_when_their_file_exists(self):
+        with open(fleet_config.PATH, "w") as f:
+            f.write('[setup]\nafter = [["sst.config.ts", "node_modules/.bin/sst install"]]\n')
+        fleet_config._cache.clear()
+        self.files("bun.lock")
+        self.assertEqual(P.setup_command(self.root), "bun install")
+        self.files("sst.config.ts")
+        self.assertEqual(P.setup_command(self.root), "bun install && node_modules/.bin/sst install")
+
+    def test_a_custom_install_command_still_honours_package_manager(self):
+        with open(fleet_config.PATH, "w") as f:
+            f.write('[setup]\ninstalls = [["yarn.lock", "yarn install"], ["package-lock.json", "env CI=1 npm ci"]]\n')
+        fleet_config._cache.clear()
+        self.files("yarn.lock", "package-lock.json", package='{"packageManager": "npm@11"}')
+        self.assertEqual(P.pick_lockfile(self.root), ("package-lock.json", "env CI=1 npm ci"))
+
+    def test_no_lockfile_no_command(self):
+        self.files("sst.config.ts")
+        self.assertIsNone(P.setup_command(self.root))
+
+
 class NoHooks(unittest.TestCase):
     def test_every_new_worktree_is_made_with_hooks_off(self):
         """dev's tests run a failing hook; every other tool is held to it here: a call that makes or

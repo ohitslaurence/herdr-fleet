@@ -23,7 +23,7 @@ CLI (for shell tools like orch):
   fleet_paths.py worktree <repo_path> <alias> <task>
   fleet_paths.py branch <alias> <task>
 """
-import getpass, os, re, shutil, subprocess, sys
+import getpass, json, os, re, shutil, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
@@ -174,6 +174,36 @@ def is_linked_worktree(path):
         return False
     lines = p.stdout.split()
     return p.returncode == 0 and len(lines) == 2 and os.path.realpath(lines[0]) != os.path.realpath(lines[1])
+
+
+# which package manager each lockfile belongs to, to honour package.json's packageManager
+LOCKFILE_MANAGER = {"bun.lock": "bun", "bun.lockb": "bun", "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn",
+                    "package-lock.json": "npm"}
+
+
+def pick_lockfile(path):
+    """(lockfile, install command) for the checkout at `path` from [setup] installs, or None.
+    A repo can carry a stray lockfile (a yarn.lock beside package-lock.json), so the one whose
+    manager package.json's packageManager names wins among those present; else config order."""
+    found = [(f, cmd) for f, cmd in fleet_config.get("setup", "installs", [])
+             if os.path.exists(os.path.join(path, f))]
+    try:
+        with open(os.path.join(path, "package.json")) as fh:
+            pm = str(json.load(fh).get("packageManager") or "").split("@")[0]
+    except (OSError, ValueError, AttributeError):
+        pm = ""
+    return next((x for x in found if pm and LOCKFILE_MANAGER.get(os.path.basename(x[0])) == pm),
+                found[0] if found else None)
+
+
+def setup_command(path):
+    """The shell command that sets up the checkout at `path`, or None without a lockfile: the
+    install, then each [setup] after step whose file exists."""
+    picked = pick_lockfile(path)
+    if not picked:
+        return None
+    after = [cmd for f, cmd in fleet_config.get("setup", "after", []) if os.path.exists(os.path.join(path, f))]
+    return " && ".join([picked[1], *after])
 
 
 def warm_caches(path, replace=False):

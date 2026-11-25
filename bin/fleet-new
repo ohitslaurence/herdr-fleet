@@ -23,7 +23,7 @@ Spares: repos listed in [spares] repos (fleet config) keep one ready worktree
 (<repos dir>/.spares/<repo>, fetched, seeded, deps installed). A new session takes it
 (git worktree move + branch rename, ~1 s) and a fresh spare builds in the background.
 Without a spare, `dev` makes the worktree, the install runs in the shell tab, and the
-agent starts at once, told to wait for node_modules/.fleet-ready before tests or builds.
+agent starts at once, told to wait for node_modules/.fleet-ready (the setup's exit status) before tests or builds.
 """
 import difflib, json, os, re, shlex, subprocess, sys, time
 from pathlib import Path
@@ -31,7 +31,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
 import fleet_proc  # noqa: E402
-from fleet_paths import NO_HOOKS, branch_name, count_worktrees, warm_caches, worktree_path  # noqa: E402
+from fleet_paths import NO_HOOKS, branch_name, count_worktrees, pick_lockfile, setup_command, warm_caches  # noqa: E402
+from fleet_paths import worktree_path  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
 NOTES = os.path.join(STATE_DIR, "notes.json")
@@ -39,11 +40,6 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["repos",
           "properties": {"repos": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 4},
                          "slug": {"type": "string"}, "note": {"type": "string"}}}
 SPARES = os.path.join(STATE_DIR, "spares")
-
-
-def lockfiles():
-    """[(lockfile, install command)] in order: [setup] installs, shared with dev."""
-    return [tuple(x) for x in fleet_config.get("setup", "installs", [])]
 
 
 def default_agent():
@@ -78,7 +74,8 @@ def agent_argv(kind, model=None):
 
 
 SETUP_NOTE = ("Setup: dependencies are still installing in this workspace's `shell` tab. Before running tests, "
-              "builds or type checks, wait until node_modules/.fleet-ready exists.")
+              "builds or type checks, wait until node_modules/.fleet-ready exists. It holds the setup's exit "
+              "status: if that isn't 0, read the shell tab and fix the install before going on.")
 
 
 def launch_cmd(kind, model, text, send, installing):
@@ -528,14 +525,21 @@ def open_sessions():
     return out[:60]
 
 
-def install_cmd(path):
-    return next((cmd for f, cmd in lockfiles() if os.path.exists(os.path.join(path, f))), None)
+def install_steps(installs):
+    """One shell line running each (worktree, command) setup. Each worktree's marker is written
+    whether its setup passed or not, holding the exit status, so an agent waiting on it learns of
+    a failure instead of waiting for good."""
+    def one(wt, cmd):
+        q = shlex.quote
+        return (f"(cd {q(wt)} && {cmd}; s=$?; mkdir -p {q(wt + '/node_modules')}; "
+                f"echo $s > {q(wt + '/node_modules/.fleet-ready')})")
+    return "; ".join(one(wt, cmd) for wt, cmd in installs)
 
 
 def lock_hash(path):
     import hashlib
-    f = next((os.path.join(path, f) for f, _ in lockfiles() if os.path.exists(os.path.join(path, f))), None)
-    return hashlib.sha256(Path(f).read_bytes()).hexdigest()[:16] if f else ""
+    picked = pick_lockfile(path)
+    return hashlib.sha256(Path(path, picked[0]).read_bytes()).hexdigest()[:16] if picked else ""
 
 
 def spare_repos():
@@ -641,7 +645,7 @@ def build_or_refresh_spare(repo, max_age=20 * 60, wait=False):
             before = lock_hash(sp)
             git("-C", sp, "reset", "-q", "--hard", f"origin/{base}")
         warmed = warm_caches(sp, replace=True)
-        cmd = install_cmd(sp)
+        cmd = setup_command(sp)
         if cmd and (before is None or before != lock_hash(sp) or not os.path.isdir(os.path.join(sp, "node_modules"))):
             p = subprocess.run(cmd, shell=True, cwd=sp, capture_output=True, text=True)
             if p.returncode != 0:
@@ -938,7 +942,7 @@ def main(argv):
             primary, stale_deps = took
             run("dev", d["repos"][0], d["slug"], env=env)  # existing checkout: dev just opens workspace + tabs
             if stale_deps:
-                installs.append((primary, install_cmd(primary)))
+                installs.append((primary, setup_command(primary)))
         else:
             print("creating worktree…", flush=True)
             if len(d["repos"]) == 1:
@@ -947,8 +951,8 @@ def main(argv):
                 run("dev", "cross", d["slug"], *d["repos"], env=env)
             for r in d["repos"]:
                 wt = worktree_path(by_alias[r]["path"], r, d["slug"])
-                if install_cmd(wt):
-                    installs.append((wt, install_cmd(wt)))
+                if cmd := setup_command(wt):
+                    installs.append((wt, cmd))
     # lock released: the next free worktree builds behind it (and waits for anyone who got in first)
     for r in d["repos"]:
         if r in spare_repos() and not spare_meta(r).get("ready"):
@@ -961,9 +965,7 @@ def main(argv):
         die(f"worktree made at {primary} but no herdr workspace found for it")
     shell = tab_pane(ws, "shell")
     if installs and shell:
-        steps = " && ".join(f"(cd {shlex.quote(wt)} && {cmd} && touch node_modules/.fleet-ready)"
-                            for wt, cmd in installs)
-        run("herdr", "pane", "run", shell, steps)
+        run("herdr", "pane", "run", shell, install_steps(installs))
     agent_tab = find_tab(ws, "agent")
     pane = pane_of(agent_tab)
     if pane and "--no-agent" not in flags:

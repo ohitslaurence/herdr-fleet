@@ -8,6 +8,12 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- Fix: a new worktree's setup ran the wrong package manager when a repo carried a stray lockfile
+  (yarn in an npm repo); package.json's `packageManager` now decides, for the install and for the
+  spare's lockfile check. New `[setup] after` steps run once the install is done (e.g. `sst install`
+  where there's an `sst.config.ts`, so infra typechecks work in fresh worktrees). `dev` and
+  `fleet new` now write `node_modules/.fleet-ready` even when setup fails, holding its exit status,
+  so agents stop waiting for a marker that never comes.
 - Fix: a stacked PR (merged into another PR's branch) was reported "deployed" from its own merge,
   even when that branch had already merged and the code never reached main. ship now follows the
   PR whose head is the base: deployed via that PR's deploy, the new terminal state
