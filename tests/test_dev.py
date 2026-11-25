@@ -328,6 +328,7 @@ class SingleRepo(DevTestCase):
     def test_create_runs_lockfile_install(self):
         r = self.ok("platform", "deps", DEV_SKIP_INSTALL="")
         self.assertIn("bootstrap: running npm ci", r.stdout)
+        self.assertEqual(Path(self.platform + "-wt-deps", "node_modules", ".fleet-ready").read_text(), "0\n")
         with open(self.env["FAKE_NPM_LOG"]) as f:
             self.assertEqual(json.loads(f.readline()), {"args": ["ci"], "cwd": self.platform + "-wt-deps"})
 

@@ -1,6 +1,7 @@
 """fleet new starts any configured coding agent: the default from [roles.driver], another when
 the sentence names it, permission bypass only when the config opts in."""
-import contextlib, importlib.machinery, importlib.util, io, os, subprocess, sys, tempfile, textwrap, unittest
+import contextlib, importlib.machinery, importlib.util, io, os, shutil, subprocess, sys, tempfile, textwrap, unittest
+from pathlib import Path
 from unittest import mock
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin")
@@ -183,12 +184,15 @@ class FirstInstruction(unittest.TestCase):
 
 class SetupMarker(unittest.TestCase):
     def test_marker_holds_each_setups_exit_status_even_when_one_fails(self):
-        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
-        line = N.install_steps([(a, "sh -c 'exit 3'"), (b, "true")])
-        subprocess.run(["sh", "-c", line], check=False)
-        for wt, want in ((a, "3"), (b, "0")):
-            with open(os.path.join(wt, "node_modules", ".fleet-ready")) as f:
-                self.assertEqual(f.read().strip(), want)
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        a, b, gone = (os.path.join(root, n) for n in ("a", "b", "gone"))
+        os.makedirs(a), os.makedirs(b)
+        line = N.install_steps([(a, "sh -c 'exit 3'"), (b, "true"), (gone, "true")])
+        subprocess.run(["sh", "-c", line], check=False, capture_output=True)
+        read = lambda wt: Path(wt, "node_modules", ".fleet-ready").read_text().strip()
+        self.assertEqual((read(a), read(b)), ("3", "0"))
+        self.assertNotEqual(read(gone), "0")  # a checkout that can't be entered is a failed setup too
 
 
 if __name__ == "__main__":

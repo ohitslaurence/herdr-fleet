@@ -101,11 +101,12 @@ DEFAULTS = {
     "hints": {},
     "spares": {"repos": [], "refresh_minutes": 20},
     # dependency install for a new worktree: package.json's packageManager picks among the
-    # lockfiles present, else the first lockfile found; then each `after` step whose file exists
+    # lockfiles present, else the first lockfile found; then each `after` [file, command] step
+    # whose file exists (e.g. ["sst.config.ts", "node_modules/.bin/sst install"])
     "setup": {"installs": [["bun.lock", "bun install"], ["bun.lockb", "bun install"],
                            ["pnpm-lock.yaml", "pnpm install --frozen-lockfile"], ["yarn.lock", "yarn install"],
                            ["package-lock.json", "npm ci"]],
-              "after": [["sst.config.ts", "node_modules/.bin/sst install"]]},
+              "after": []},
     # repos dev and fleet new know: every git checkout directly in repos_dir (alias = folder
     # name), plus [dev.repos.<alias>] path = "...", base = "main" for others or to override one
     "dev": {"repos_dir": "", "repos": {}, "warm_caches": []},
