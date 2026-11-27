@@ -178,7 +178,7 @@ def worker_status(name, meta):
     """The multiplexer's word for a worker, on the backend it was started on; "-" if it can't say."""
     import fleet_mux
     try:
-        row = fleet_mux.get(name, meta.get("mux") or None)
+        row = fleet_mux.get(name, meta.get("mux") or "herdr")  # no mux=: started before backends, in herdr
     except fleet_mux.MuxDown:  # a meta naming no known backend
         row = None
     return (row or {}).get("agent_status") or "-"

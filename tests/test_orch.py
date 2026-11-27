@@ -330,6 +330,19 @@ class StartAndWait(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(self.read("prompts").splitlines(), ["carry on"])
 
+    def test_worker_from_before_backends_stays_on_herdr_after_a_switch(self):
+        self.screens(CLAUDE_COMPOSER, "✻ Thinking… (esc to interrupt)")
+        self.start()  # on herdr
+        meta = os.path.join(self.fake, "state", "w1", "meta")
+        with open(meta) as f:
+            lines = [l for l in f if not l.startswith("mux=")]  # what a pre-#16 worker's meta looks like
+        with open(meta, "w") as f:
+            f.writelines(lines)
+        os.remove(os.path.join(self.fake, "prompts"))
+        p = self.orch("prompt", "w1", "carry on", FLEET_MUX="core")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.read("prompts").splitlines(), ["carry on"])  # herdr's agent prompt, not hc
+
     def test_wait_warns_when_no_watcher_will_report_back(self):
         p = self.orch("wait", "--timeout", "1")
         self.assertIn("the fleet watcher isn't running", p.stderr)  # HOME is a temp dir: no server there
