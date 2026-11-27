@@ -17,7 +17,7 @@ CLI (for bash callers such as orch), JSON out unless noted; help anywhere prints
   fleet mux backend | here | agents | get <ref> | status <ref> (bare word)
   fleet mux read <ref> [--lines N] [--visible] (text) | send <ref> <text> | keys <ref> <key>...
   fleet mux spawn --cwd D [--name N] [--label k=v]... [--group G] [--kind K] -- <argv>...   (core)
-  fleet mux label <ref> k=v... (core) | close <ref> (core)
+  fleet mux label <ref> k=v... (core) | close <ref>
 """
 import json, os, sys
 
@@ -38,9 +38,17 @@ REPO_ROOT = "fleet.repo_root"    # a dev context's repo
 
 AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
 
-# herdr's variables, dropped from a terminal fleet starts on core: an agent there that saw the
-# orchestrator's HERDR_PANE_ID would report and act as that pane.
-HERDR_ENV = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH")
+# Unset in every program fleet starts on core. hc gives a terminal the environment of its own
+# server, and an hc server first started from inside an agent (any `hc` call starts one) carries
+# that agent's variables: its herdr pane, which an agent there would report and act as, and its
+# Claude Code session markers. Claude Code started under another's CLAUDE_CODE_CHILD_SESSION runs
+# as its child and saves no transcript, so a resumed session would silently stop being saved.
+# `fleet doctor` warns when the server has them (the fix: restart it from a clean shell).
+CALLER_ENV = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH",
+              "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
+              "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED",
+              "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT", "CLAUDE_EFFORT", "CLAUDE_PID",
+              "CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
 
 
 class MuxDown(fleet_proc.HerdrDown):
@@ -85,7 +93,12 @@ def _call(prog, args, timeout=10, env=None, ok=(0,)):
     except FileNotFoundError:
         raise MuxDown(f"{prog} isn't on PATH") from None
     if p.returncode not in ok:
-        raise MuxDown((p.stderr.strip().splitlines() or [f"`{prog} {' '.join(args)}` exited {p.returncode}"])[0][:200])
+        first = (p.stderr.strip().splitlines() or [f"`{prog} {' '.join(args)}` exited {p.returncode}"])[0]
+        try:  # hc --json reports errors as {"error": {"message", "hint", "kind"}}
+            first = json.loads(first)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        raise MuxDown(first[:200])
     return p.stdout
 
 
@@ -131,13 +144,37 @@ class Herdr:
     def rename_group(self, group, name):
         _call("herdr", ["workspace", "rename", group, name])
 
+    def argv(self, ref):
+        """The command line of the program in the pane's foreground (`fleet migrate` restarts it)."""
+        info = _json("herdr", ["pane", "process-info", "--pane", ref]).get("result", {}).get("process_info", {})
+        procs = info.get("foreground_processes") or []
+        return list(procs[0].get("argv") or []) if procs else []
+
+    def close(self, ref):
+        """Close the pane, ending its program."""
+        _call("herdr", ["pane", "close", ref])
+
     def spawn(self, *a, **k):
         raise MuxDown("herdr: agents start in tabs (orch, dev, fleet new), not through the seam")
 
-    label = close = spawn
+    label = spawn
 
 
 # ---- herdr-core ------------------------------------------------------------------------------
+
+_HELP = {}
+
+
+def takes_flag(prog, flag):
+    """Whether `prog --help` lists flag (cached per program). Codex grew --no-daemon after
+    0.153; passing it to an older one makes it exit at once."""
+    if prog not in _HELP:
+        try:
+            _HELP[prog] = fleet_proc.run([prog, "--help"], timeout=10).stdout
+        except (OSError, fleet_proc.subprocess.SubprocessError):
+            _HELP[prog] = ""
+    return flag in _HELP[prog].split() or f"{flag}," in _HELP[prog] or f"{flag}=" in _HELP[prog]
+
 
 def core_status(t):
     """herdr's word for an hc terminal. A program that never reported has no status (unknown);
@@ -228,7 +265,7 @@ class Core:
 
     def spawn(self, argv, cwd, name=None, labels=None, group=None, kind=None):
         argv = list(argv)
-        if kind == "codex" and "--no-daemon" not in argv:
+        if kind == "codex" and "--no-daemon" not in argv and takes_flag(argv[0], "--no-daemon"):
             argv.insert(1, "--no-daemon")  # else Codex's daemon runs its commands outside the terminal
         labels = dict(labels or {})
         if group:
@@ -240,8 +277,8 @@ class Core:
             args += ["--name", name]
         for k, v in labels.items():
             args += ["--label", f"{k}={v}"]
-        env = {k: v for k, v in os.environ.items() if k not in HERDR_ENV}
-        return _json("hc", [*args, "--", *argv], timeout=30, env=env)["address"]
+        clean = ["env", *(a for k in CALLER_ENV for a in ("-u", k))]
+        return _json("hc", [*args, "--", *clean, *argv], timeout=30)["address"]
 
     def label(self, ref, **kv):
         _call("hc", ["label", ref, *(f"{k}={v}" for k, v in kv.items())])

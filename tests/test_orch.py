@@ -306,6 +306,10 @@ class StartAndWait(unittest.TestCase):
 
     def test_core_starts_a_labelled_terminal_and_records_its_backend(self):
         self.screens(CODEX_COMPOSER, "• Working (3s • esc to interrupt)")
+        codex = os.path.join(self.fake, "bin", "codex")  # a Codex new enough to take --no-daemon
+        with open(codex, "w") as f:
+            f.write("#!/bin/sh\necho '      --no-daemon'\n")
+        os.chmod(codex, 0o755)
         p = self.orch("start", "w1", "--repo", "api", "--brief", os.path.join(self.fake, "brief.md"),
                       "--kind", "codex", FLEET_MUX="core", HC_TERMINAL_ID="t1")
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -313,6 +317,7 @@ class StartAndWait(unittest.TestCase):
         self.assertIn("fleet.group=api-wt-w1", run)
         self.assertIn("fleet.by=t1", run)
         cmd = run[run.index("--") + 1:]
+        cmd = cmd[cmd.index("codex"):]  # past fleet's `env -u ...` wrapper
         self.assertEqual(cmd[:2], ["codex", "--no-daemon"])  # else Codex runs commands outside hc
         meta = self.read(os.path.join("state", "w1", "meta"))
         self.assertIn("mux=core", meta)

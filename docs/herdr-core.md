@@ -53,11 +53,44 @@ with labels, which every Herdr client can read:
 | `fleet watch` | Wakes on `hc events` instead of herdr's socket; reads and prompts agents with `hc read` / `hc send`. |
 | `ship`, `fleet note`, `fleet gripe` | Know their own terminal from `HC_TERMINAL_ID`. |
 | `fleet ls` | Rows named from terminal names and `fleet.task`. Focus and rename are the app's job (rename sets `fleet.task`). |
-| `fleet doctor` | Checks `hc` is up and whether each configured agent harness reports status. |
+| `fleet doctor` | Checks `hc` is up, whether each configured agent harness reports status, and whether new terminals would inherit an agent's session (below). |
 
-A terminal started by `hc` inherits the environment of whoever started it; fleet drops herdr's
-variables (`HERDR_PANE_ID` and friends) from the terminals it starts, so an agent there never
-acts as the herdr pane that launched it.
+## The environment terminals get
+
+An hc terminal gets the environment of the hc *holder* process that keeps it, and a holder keeps
+the environment of whatever started it. Start hc from inside an agent (any `hc` command starts
+the server) and every terminal inherits that agent's variables: its herdr pane, which an agent
+there would report and act as, and its Claude Code session markers. A Claude Code started under
+another's `CLAUDE_CODE_CHILD_SESSION` runs as its child and **saves no transcript**.
+
+Fleet unsets these in every program it starts on core (`env -u ...`, the list is
+`fleet_mux.CALLER_ENV`), so its own agents are fine either way. Shells you open from the Herdr app
+are not: `fleet doctor` warns (`core.env`) when the current holder has them. To fix it, from a
+plain login shell (not inside an agent) with nothing open on core: kill the `herdr-core hold`
+processes, run `hc server restart`, then open one terminal so the new holder starts from that shell.
+
+## Moving running agents over: `fleet migrate`
+
+A running program can't change multiplexer, but its session can. `fleet migrate` starts each
+herdr agent again on core in the same directory, resuming its session (`claude --resume <id>`,
+`codex resume <id>`) with the flags it was started with, under its herdr name. The conversation,
+worktree, branch and uncommitted files carry over; the process and its prompt cache are new.
+
+```
+fleet server stop
+fleet migrate --dry-run --all     # what would move, the command each would run, and who stays
+fleet migrate --all               # asks first; --yes to skip
+# then [mux] backend = "core" and: fleet server start
+```
+
+- Only an agent that is idle or done moves, and it's checked again just before it moves.
+- Its herdr pane closes only once the new terminal has stayed up, so a resume that fails leaves it where it was.
+- Fleet's records follow it: orch worker meta (`pane=`, `mux=core`, and `by=` of its workers),
+  ship ledgers, notes and the watcher's inbox.
+- `--all` leaves out harnesses that don't report status on core (Codex before 0.162.2) and ones
+  fleet can't resume (opencode); name a pane or agent to move it anyway. The pane running
+  `fleet migrate` stays: run it from another.
+- Stop the watcher first: it keeps its inbox in memory and would write the old panes back.
 
 ## Setup
 

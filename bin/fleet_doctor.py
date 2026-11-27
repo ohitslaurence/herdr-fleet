@@ -120,9 +120,42 @@ def check_herdr():
 STATUS_SINCE = {"claude": "2.1.295", "codex": "0.162.2"}  # codex: merged after the 0.162.1 release
 
 
-def judge_core(have, tested, agents_or_error, kinds):
+def reports_status(kind, version):
+    """Whether this harness version tells herdr-core its status (else its sessions show unknown)."""
+    since = STATUS_SINCE.get(kind)
+    return bool(since and version and vtuple(version) >= vtuple(since))
+
+
+def harness_version(kind):
+    """The installed version of a configured harness, or None if it isn't installed or won't say."""
+    cmd = fleet_config.agent_kinds()[kind]["cmd"][0]
+    vrc, vout = sh(cmd, "--version") if shutil.which(cmd) else (127, "")
+    m = re.search(r"(\d+\.\d+\.\d+)", vout or "")
+    return m.group(1) if vrc == 0 and m else None
+
+
+def holder_leaks():
+    """Agent-session and herdr variables in the environment herdr-core gives new terminals (its
+    current holder's), by name. Linux only (reads /proc); [] when it can't tell."""
+    import fleet_mux
+    rc, out = sh("hc", "server", "status", "--json")
+    try:
+        pid = json.loads(out)["holder"]["pid"]
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            names = {e.split(b"=", 1)[0].decode(errors="replace") for e in f.read().split(b"\0") if e}
+    except (ValueError, KeyError, TypeError, OSError):
+        return []
+    return sorted(names & set(fleet_mux.CALLER_ENV))
+
+
+CLEAN_RESTART = ("from a plain login shell (not inside an agent), with nothing open on core: "
+                 "kill the `herdr-core hold` processes, then `hc server restart` and open one terminal")
+
+
+def judge_core(have, tested, agents_or_error, kinds, leaks=()):
     """have/tested: hc versions; agents_or_error: agent count, or why hc didn't answer;
-    kinds: {kind: installed version or None} for the configured harnesses."""
+    kinds: {kind: installed version or None} for the configured harnesses; leaks: agent variables
+    in what new terminals inherit."""
     res = []
     if isinstance(agents_or_error, str):
         res.append(r("core", "fail", f"herdr-core {have} isn't answering: {agents_or_error}", "hc server start"))
@@ -135,13 +168,19 @@ def judge_core(have, tested, agents_or_error, kinds):
         since = STATUS_SINCE.get(kind)
         if version is None:
             continue
-        if not since or vtuple(version) < vtuple(since):
+        if not reports_status(kind, version):
             res.append(r(f"core.status.{kind}", "warn",
                          f"{kind} {version} doesn't report its status to herdr-core (needs {since or 'support'}+): "
                          "its sessions show 'unknown', and fleet can't tell working from idle",
                          f"upgrade {kind}" if since else f"run {kind} on the herdr backend"))
         else:
             res.append(r(f"core.status.{kind}", "ok", f"{kind} {version} reports its status"))
+    if leaks:
+        res.append(r("core.env", "warn",
+                     f"new herdr-core terminals inherit an agent's session ({', '.join(leaks[:3])}"
+                     f"{', ...' if len(leaks) > 3 else ''}): hc was started from inside one. Fleet's own "
+                     "terminals unset them, but a Claude you start by hand there saves no transcript",
+                     CLEAN_RESTART))
     return res
 
 
@@ -159,13 +198,8 @@ def check_core():
         agents = len(fleet_mux.agents())
     except fleet_mux.MuxDown as e:
         agents = str(e)
-    kinds = {}
-    for kind in used_kinds():
-        cmd = fleet_config.agent_kinds()[kind]["cmd"][0]
-        vrc, vout = sh(cmd, "--version") if shutil.which(cmd) else (127, "")
-        m = re.search(r"(\d+\.\d+\.\d+)", vout or "")
-        kinds[kind] = m.group(1) if vrc == 0 and m else None
-    return judge_core(out.split()[-1] if out else "0", fleet_version.TESTED_CORE_MAX, agents, kinds)
+    kinds = {kind: harness_version(kind) for kind in used_kinds()}
+    return judge_core(out.split()[-1] if out else "0", fleet_version.TESTED_CORE_MAX, agents, kinds, holder_leaks())
 
 
 def plugin_fix():
