@@ -80,8 +80,20 @@ class HerdrDown(RuntimeError):
     """herdr couldn't be asked. Not the same as "no agents": callers must not read it as one."""
 
 
+def first_line(args, timeout):
+    """(first stdout line, stderr) of a command that streams and never exits on its own (`hc
+    events`): read one line, then kill it. ("", stderr) when nothing came within timeout seconds."""
+    import select
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p:
+        ready, _, _ = select.select([p.stdout], [], [], timeout)
+        first = p.stdout.readline() if ready else ""
+        p.kill()
+        return first, "" if first else p.stderr.read()
+
+
 def herdr_agents():
-    """herdr's agent panes. Raises HerdrDown with the reason when herdr can't answer."""
+    """herdr's agent panes (fleet_mux.agents() for whichever multiplexer is configured). Raises
+    HerdrDown with the reason when herdr can't answer."""
     try:
         p = run(["herdr", "agent", "list"], timeout=10)  # a local socket: slower than this is down
     except FileNotFoundError:

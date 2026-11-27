@@ -93,9 +93,19 @@ def judge_herdr(have, need, tested, agents_or_error):
     return r("herdr", "ok", f"herdr {have}, {agents_or_error} agent pane(s)")
 
 
+def on_core():
+    import fleet_mux
+    try:
+        return fleet_mux.is_core()
+    except fleet_mux.MuxDown:
+        return False
+
+
 def check_herdr():
     rc, out = sh("herdr", "--version")
     if rc == 127:
+        if on_core():
+            return r("herdr", "skip", "herdr isn't installed ([mux] backend is core)")
         return r("herdr", "fail", "herdr isn't installed", "install herdr: https://herdr.dev")
     import fleet_proc
     try:
@@ -104,6 +114,58 @@ def check_herdr():
         panes = str(e)
     return judge_herdr(out.split()[-1] if out else "0", fleet_version.manifest().get("min_herdr_version", "0"),
                        fleet_version.TESTED_HERDR_MAX, panes)
+
+
+# OSC 7501 status reports: herdr-core shows an agent's status only when the agent sends them
+STATUS_SINCE = {"claude": "2.1.295", "codex": "0.162.2"}  # codex: merged after the 0.162.1 release
+
+
+def judge_core(have, tested, agents_or_error, kinds):
+    """have/tested: hc versions; agents_or_error: agent count, or why hc didn't answer;
+    kinds: {kind: installed version or None} for the configured harnesses."""
+    res = []
+    if isinstance(agents_or_error, str):
+        res.append(r("core", "fail", f"herdr-core {have} isn't answering: {agents_or_error}", "hc server start"))
+    elif vtuple(have) > vtuple(tested):
+        res.append(r("core", "warn", f"herdr-core {have} is newer than the newest tested ({tested})",
+                     "if something breaks, report it with `fleet doctor --json`"))
+    else:
+        res.append(r("core", "ok", f"herdr-core {have}, {agents_or_error} agent terminal(s)"))
+    for kind, version in kinds.items():
+        since = STATUS_SINCE.get(kind)
+        if version is None:
+            continue
+        if not since or vtuple(version) < vtuple(since):
+            res.append(r(f"core.status.{kind}", "warn",
+                         f"{kind} {version} doesn't report its status to herdr-core (needs {since or 'support'}+): "
+                         "its sessions show 'unknown', and fleet can't tell working from idle",
+                         f"upgrade {kind}" if since else f"run {kind} on the herdr backend"))
+        else:
+            res.append(r(f"core.status.{kind}", "ok", f"{kind} {version} reports its status"))
+    return res
+
+
+def check_core():
+    rc, out = sh("hc", "--version")
+    if rc == 127:
+        if on_core():
+            return [r("core", "fail", "[mux] backend is core but hc isn't installed",
+                      "curl -fsSL https://releases.herdr.dev/core/install.sh | sh")]
+        return [r("core", "skip", "herdr-core isn't installed (optional: [mux] backend)")]
+    if not on_core():
+        return [r("core", "skip", f"herdr-core {out.split()[-1] if out else '?'} installed; [mux] backend is herdr")]
+    import fleet_mux
+    try:
+        agents = len(fleet_mux.agents())
+    except fleet_mux.MuxDown as e:
+        agents = str(e)
+    kinds = {}
+    for kind in used_kinds():
+        cmd = fleet_config.agent_kinds()[kind]["cmd"][0]
+        vrc, vout = sh(cmd, "--version") if shutil.which(cmd) else (127, "")
+        m = re.search(r"(\d+\.\d+\.\d+)", vout or "")
+        kinds[kind] = m.group(1) if vrc == 0 and m else None
+    return judge_core(out.split()[-1] if out else "0", fleet_version.TESTED_CORE_MAX, agents, kinds)
 
 
 def plugin_fix():
@@ -345,7 +407,7 @@ def check_skill():
 
 
 CHECKS = [("python", check_python), ("bash", check_bash), ("bins", check_bins), ("bins.login_shell", check_login_shell),
-          ("herdr", check_herdr), ("herdr.plugin", check_plugin), ("herdr.keys", check_herdr_keys),
+          ("herdr", check_herdr), ("core", check_core), ("herdr.plugin", check_plugin), ("herdr.keys", check_herdr_keys),
           ("herdr.integrations", check_integrations), ("gh", check_gh), ("agents", check_agents),
           ("codex.sandbox", check_codex_sandbox), ("repos", check_repos), ("config", check_config),
           ("keys", check_keys), ("watch", check_watch), ("skill", check_skill)]

@@ -80,7 +80,8 @@ it again, until a terminal state (`deployed`, `awaiting-human`, `needs-human`, `
 READ (run freely):
 `fleet ls [--json]` · `fleet inbox [--json]` · `fleet why` · `fleet config show [key]` ·
 `fleet doctor` · `fleet version` · `fleet server status` · `fleet keys status` · `fleet learn` · `fleet gripes --json` ·
-`fleet update --check` · `ship pr <ref>` · `ship [<pr>] --json` · `ship findings` ·
+`fleet update --check` · `fleet mux backend` / `fleet mux agents` (which multiplexer hosts the agents,
+herdr or herdr-core, and what it sees) · `ship pr <ref>` · `ship [<pr>] --json` · `ship findings` ·
 `ship policy` · `ship guide <topic>` · `dev ls` · `dev repos` · `orch status` · `orch report <n>`
 
 WRITE (in your own worktree or PR):

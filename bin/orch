@@ -60,11 +60,16 @@ state_of() { last_status "$1" | sed -E 's/^([a-z-]+).*/\1/'; }
 # keep in step with fleet_orch.TERMINAL (a test checks)
 is_terminal() { case "$1" in done|failed|blocked|needs-decision) return 0;; *) return 1;; esac; }
 
-agent_status() { herdr agent get "$1" 2>/dev/null | pick result.agent.agent_status 2>/dev/null || echo "-"; }
+# The multiplexer seam (bin/fleet_mux.py). wmux <worker> <verb>...: on the backend that worker was
+# started on (meta mux=), whatever [mux] backend says now.
+mux() { python3 "$BIN/fleet_mux.py" "$@"; }
+wmux() { local m; m=$(sed -n 's/^mux=//p' "$ORCH_HOME/$1/meta" 2>/dev/null || true); shift; FLEET_MUX="$m" python3 "$BIN/fleet_mux.py" "$@"; }
+agent_status() { wmux "$1" status "$1" 2>/dev/null || echo "-"; }
 
 cmd_start() {
   local name="$1"; shift
   local repo="" brief="" placement="tab" role="worker" kind_opt="" model_opt="" effort_opt=""
+  local backend; backend=$(mux backend) || die "no multiplexer: $backend"
   [[ -n "${HERDR_WORKSPACE_ID:-}" ]] || placement="workspace"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -92,12 +97,15 @@ cmd_start() {
     kind_opt="${kind_opt:-$nick_kind}"
   fi
   kind="${kind_opt:-$kind}"; model="${model_opt:-$model}"; effort="${effort_opt:-$effort}"
+  # herdr-core has no workspaces or tabs: the worker is a labelled terminal (docs/herdr-core.md)
+  [[ "$backend" == core ]] && placement="core"
   [[ "$placement" == tab && -z "${HERDR_WORKSPACE_ID:-}" ]] && die "--tab needs HERDR_WORKSPACE_ID (run inside a herdr pane)"
   [[ "$name" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match [a-z][a-z0-9_-]{0,31}"
   [[ -n "$repo" && -n "$brief" ]] || die "usage: orch start <name> --repo <alias> --brief <file>"
   [[ "$repo" =~ ^[A-Za-z0-9._-]+$ ]] || die "repo alias must match [A-Za-z0-9._-]+"
   [[ -f "$brief" ]] || die "brief not found: $brief"
-  need herdr; need dev; need python3
+  if [[ "$backend" == core ]]; then need hc; else need herdr; fi
+  need dev; need python3
   [[ -d "$ORCH_HOME/$name" ]] && die "worker '$name' already exists (orch done $name first)"
 
   local dir="$ORCH_HOME/$name"; mkdir -p "$dir"
@@ -120,8 +128,8 @@ PY
 )
 
   else
-    # 1b. worktree with dev's conventions, pane as a new tab in the caller's workspace
-    ws="$HERDR_WORKSPACE_ID"
+    # 1b. worktree with dev's conventions; on herdr, a new tab in the caller's workspace
+    ws=""; [[ "$placement" == tab ]] && ws="$HERDR_WORKSPACE_ID"
     local repo_path base
     repo_path=$(command dev repos --json | pick repos "alias=$repo" path)
     base=$(command dev repos --json | pick repos "alias=$repo" defaultBranch)
@@ -140,10 +148,12 @@ PY
       fi
       (cd "$worktree" && command dev bootstrap >/dev/null 2>&1 || true)
     fi
-    local created
-    created=$(herdr tab create --workspace "$ws" --cwd "$worktree" --label "$name" --no-focus)
-    tab=$(pick result.tab.tab_id <<<"$created")
-    pane=$(pick result.root_pane.pane_id <<<"$created")
+    if [[ "$placement" == tab ]]; then
+      local created
+      created=$(herdr tab create --workspace "$ws" --cwd "$worktree" --label "$name" --no-focus)
+      tab=$(pick result.tab.tab_id <<<"$created")
+      pane=$(pick result.root_pane.pane_id <<<"$created")
+    fi
   fi
 
   # 2. render the brief (python: paths with | or & are literal; a leftover {{TASK}} is an error)
@@ -175,16 +185,25 @@ PY
       [[ -n "$model" ]] && args+=(--model "$model") ;;
     *) die "kind must be codex, claude or opencode";;
   esac
+  # by: the orchestrator's pane/terminal, so wait and fleet watch know whose worker this is
+  local by; by=$(mux here)
+  if [[ "$backend" == core ]]; then
+    # the terminal is the pane: start the harness in it, labelled with its worktree and orchestrator
+    pane=$(mux spawn --cwd "$worktree" --name "$name" --group "$(basename "$worktree")" --kind "$kind" \
+             --label "fleet.by=$by" -- "$kind" "${args[@]}") \
+      || { echo "failed: couldn't start $kind in herdr-core" >> "$dir/status"; die "hc couldn't start $kind for $name"; }
+  fi
   # Record the worker before anything else can fail, so `orch status/done` can clean up a bad start.
-  # by: the orchestrator's pane, so wait and fleet watch know whose worker this is
-  printf 'name=%s\nkind=%s\nrepo=%s\nplacement=%s\nworkspace=%s\ntab=%s\npane=%s\nworktree=%s\nstarted=%s\nby=%s\n' \
+  printf 'name=%s\nkind=%s\nrepo=%s\nplacement=%s\nworkspace=%s\ntab=%s\npane=%s\nworktree=%s\nstarted=%s\nby=%s\nmux=%s\n' \
     "$name" "$kind" "$repo" "$placement" "$ws" "$tab" "$pane" "$worktree" "$(date -u +%FT%TZ)" \
-    "${HERDR_PANE_ID:-}" > "$dir/meta"
+    "$by" "$backend" > "$dir/meta"
   # A start that can't hand over the brief is a failed worker: say so in the status log too,
   # so `orch wait` and `orch status` don't wait on it.
-  fail() { echo "failed: $1" >> "$dir/status"; die "$1 (pane $pane; then: herdr agent prompt $name \"\$(cat $dir/brief.md)\")"; }
-  herdr agent start "$name" --kind "$kind" --pane "$pane" --timeout 90000 -- "${args[@]}" >/dev/null \
-    || echo "orch: agent start reported not-ready; waiting for the composer" >&2
+  fail() { echo "failed: $1" >> "$dir/status"; die "$1 (pane $pane; then: fleet mux send $name \"\$(cat $dir/brief.md)\")"; }
+  if [[ "$backend" != core ]]; then
+    herdr agent start "$name" --kind "$kind" --pane "$pane" --timeout 90000 -- "${args[@]}" >/dev/null \
+      || echo "orch: agent start reported not-ready; waiting for the composer" >&2
+  fi
 
   # Wait for the composer itself, not herdr's idle and not Claude's ❯ (every Claude dialog draws
   # one): the harness reports ready before it accepts input, and a prompt sent then is lost.
@@ -193,14 +212,14 @@ PY
   # a login or mode-acceptance screen, is a human's call.
   local answered=0 screen verdict="waiting"
   for _ in $(seq 1 90); do
-    screen=$(herdr agent read "$name" --source visible 2>/dev/null || true)
+    screen=$(wmux "$name" read "$name" --visible 2>/dev/null || true)
     verdict=$(python3 "$FO" classify "$kind" "$worktree" <<<"$screen")
     case "$verdict" in
       ready) break;;
       trust|hooks)
         (( answered >= 3 )) && fail "needs a human: the $verdict prompt didn't take"
         answered=$((answered + 1))
-        herdr agent send-keys "$name" down enter >/dev/null || true; sleep "$TICK"; sleep "$TICK"; sleep "$TICK";;
+        wmux "$name" keys "$name" down enter >/dev/null || true; sleep "$TICK"; sleep "$TICK"; sleep "$TICK";;
       human:*) fail "needs a human: ${verdict#human: }";;
       *) sleep "$TICK";;
     esac
@@ -213,12 +232,12 @@ PY
   local first sent got="unknown"
   first=$(head -n1 "$dir/brief.md")
   for sent in 1 2; do
-    herdr agent prompt "$name" "$(cat "$dir/brief.md")" >/dev/null || fail "brief delivery failed"
+    wmux "$name" send "$name" "$(cat "$dir/brief.md")" >/dev/null || fail "brief delivery failed"
     for _ in $(seq 1 30); do
       sleep "$TICK"
-      screen=$(herdr agent read "$name" --source visible 2>/dev/null || true)
+      screen=$(wmux "$name" read "$name" --visible 2>/dev/null || true)
       got=$(python3 "$FO" delivered "$kind" "$first" <<<"$screen")
-      # herdr's own status beats the screen: Claude keeps an empty composer on screen while it works
+      # the multiplexer's status beats the screen: Claude keeps an empty composer on screen while it works
       [[ "$got" == working || "$(agent_status "$name")" != working ]] || got=working
       [[ "$got" == working || "$got" == typed ]] && break 2
     done
@@ -227,11 +246,11 @@ PY
   done
   [[ "$got" == working || "$got" == typed ]] || fail "brief not confirmed after 2 sends: composer still empty"
   echo "$(date -u +%FT%TZ) started kind=$kind effort=$effort placement=$placement sends=$sent" >> "$dir/events.log"
-  echo "started $name ($kind) in $ws $pane -> $worktree"
+  echo "started $name ($kind) in ${ws:+$ws }$pane -> $worktree"
   warn_no_watcher
 }
 
-cmd_prompt() { herdr agent prompt "$1" "$2" >/dev/null && echo "sent to $1"; }
+cmd_prompt() { wmux "$1" send "$1" "$2" >/dev/null && echo "sent to $1"; }
 
 cmd_status() {
   python3 "$FO" status "$ORCH_HOME" "$@"
@@ -243,8 +262,9 @@ cmd_wait() {
   while [[ $# -gt 0 ]]; do
     case "$1" in --timeout) timeout="$2"; shift 2;; --all) all=1; shift;; *) names+=("$1"); shift;; esac
   done
-  if [[ ${#names[@]} -eq 0 && -n "${HERDR_PANE_ID:-}" ]]; then
-    for d in "$ORCH_HOME"/*/; do grep -qxF "by=$HERDR_PANE_ID" "$d/meta" 2>/dev/null && names+=("$(basename "$d")"); done
+  local me; me=$(mux here 2>/dev/null || true)
+  if [[ ${#names[@]} -eq 0 && -n "$me" ]]; then
+    for d in "$ORCH_HOME"/*/; do grep -qxF "by=$me" "$d/meta" 2>/dev/null && names+=("$(basename "$d")"); done
   fi
   # no pane, or workers started before orch recorded who started them: every worker
   if [[ ${#names[@]} -eq 0 ]]; then for d in "$ORCH_HOME"/*/; do [[ -f "$d/meta" ]] && names+=("$(basename "$d")"); done; fi
@@ -311,7 +331,7 @@ cmd_report() {
   if [[ "$(state_of "$1")" == done ]]; then check_done "$1"; fi
   cat "$ORCH_HOME/$1/report.md" 2>/dev/null || die "no report for $1"
 }
-cmd_log() { herdr agent read "$1" --source recent-unwrapped --lines "${2:-80}"; }
+cmd_log() { wmux "$1" read "$1" --lines "${2:-80}"; }
 
 cmd_done() {
   local name="$1"; shift || true
@@ -321,19 +341,24 @@ cmd_done() {
   # Quit the agent politely so the pane shell is all that's left.
   local kind; kind=$(sed -n 's/^kind=//p' "$ORCH_HOME/$name/meta")
   local quit="/quit"; [[ "$kind" == claude || "$kind" == opencode ]] && quit="/exit"
-  herdr agent send-keys "$name" esc >/dev/null 2>&1 || true
-  herdr pane send-text "$(sed -n 's/^pane=//p' "$ORCH_HOME/$name/meta")" "$quit" >/dev/null 2>&1 || true
-  sleep 1; herdr pane send-keys "$(sed -n 's/^pane=//p' "$ORCH_HOME/$name/meta")" enter >/dev/null 2>&1 || true
+  local meta="$ORCH_HOME/$name/meta" placement; placement=$(sed -n 's/^placement=//p' "$meta")
+  wmux "$name" keys "$name" esc >/dev/null 2>&1 || true
+  if [[ "$placement" == core ]]; then
+    wmux "$name" send "$name" "$quit" >/dev/null 2>&1 || true
+  else
+    herdr pane send-text "$(sed -n 's/^pane=//p' "$meta")" "$quit" >/dev/null 2>&1 || true
+    sleep 1; herdr pane send-keys "$(sed -n 's/^pane=//p' "$meta")" enter >/dev/null 2>&1 || true
+  fi
   sleep 2
-  local meta="$ORCH_HOME/$name/meta"
-  if [[ "$(sed -n 's/^placement=//p' "$meta")" == tab ]]; then
-    # Tab mode: close the tab, then remove the worktree ourselves (dev has no context for it).
+  if [[ "$placement" == tab || "$placement" == core ]]; then
+    # Tab or core: close the tab / terminal, then remove the worktree ourselves (dev has no context for it).
     local tab wt repo_alias repo_path branch base
     tab=$(sed -n 's/^tab=//p' "$meta"); wt=$(sed -n 's/^worktree=//p' "$meta"); repo_alias=$(sed -n 's/^repo=//p' "$meta")
     repo_path=$(command dev repos --json | pick repos "alias=$repo_alias" path)
     base=$(command dev repos --json | pick repos "alias=$repo_alias" defaultBranch)
     branch=$(git -C "$wt" branch --show-current 2>/dev/null || true)
-    [[ -n "$tab" ]] && herdr tab close "$tab" >/dev/null 2>&1 || true
+    if [[ "$placement" == core ]]; then wmux "$name" close "$name" >/dev/null 2>&1 || true
+    elif [[ -n "$tab" ]]; then herdr tab close "$tab" >/dev/null 2>&1 || true; fi
     sleep 1
     if [[ "${1:-}" != "--force" && -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
       echo "orch: $wt has uncommitted changes; left in place (orch done $name --force to discard)" >&2

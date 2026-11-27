@@ -26,6 +26,7 @@ ADD_REPO = ("set [dev] repos_dir to the folder your checkouts live in, or add [d
             "in ~/.config/fleet/config.toml")
 LABEL_SEP = "__"
 import fleet_config  # noqa: E402
+import fleet_mux  # noqa: E402
 
 
 def default_tabs():
@@ -45,7 +46,75 @@ class Result(NamedTuple):
 
 
 Repos = dict[str, Repo]
-Context = dict  # one entry of `herdr workspace list` that has a linked worktree
+Context = dict  # one entry of `herdr workspace list` that has a linked worktree (on core: core_contexts)
+
+
+# ---------------------------------------------------------------- herdr-core
+# herdr-core has no workspaces: a context is a worktree plus the terminals labelled with it.
+# dev and fleet new label every terminal they start there (docs/herdr-core.md).
+
+def on_core() -> bool:
+    return fleet_mux.is_core()
+
+
+def require_mux():
+    require_command("hc" if on_core() else "herdr")
+
+
+def core_terminals() -> list[dict]:
+    try:
+        return fleet_mux.Core().terminals()
+    except fleet_mux.MuxDown as e:
+        die(f"herdr-core: {e}")
+
+
+def core_contexts() -> list[Context]:
+    by: dict[str, Context] = {}
+    for t in core_terminals():
+        labels = t.get("labels") or {}
+        wt = labels.get(fleet_mux.WORKTREE)
+        if not wt:
+            continue  # finished terminals stay: dev done and prune remove them with the context
+        ctx = by.setdefault(wt, {"workspace_id": labels.get(fleet_mux.GROUP) or os.path.basename(wt),
+                                 "label": labels.get(fleet_mux.TASK) or os.path.basename(wt),
+                                 "worktree": {"checkout_path": wt, "repo_root": labels.get(fleet_mux.REPO_ROOT, ""),
+                                              "is_linked_worktree": True},
+                                 "terminals": []})
+        ctx["terminals"].append(t)
+        if fleet_mux.is_agent(t):  # the workspace's agent_status, as herdr rolls it up
+            st = fleet_mux.core_status(t)
+            if URGENCY.index(st) < URGENCY.index(ctx.get("agent_status") or "unknown"):
+                ctx["agent_status"] = st
+    return list(by.values())
+
+
+URGENCY = ("blocked", "working", "done", "idle", "unknown")
+
+
+def core_open(repo: Repo, worktree_path: str, task: str, extra: list[tuple[str, str]] | None = None) -> str:
+    """A shell terminal for the context (and one per cross sibling), unless it has one already."""
+    group = os.path.basename(worktree_path)
+    have = {t.get("cwd") for c in core_contexts() if same_path(c["worktree"]["checkout_path"], worktree_path)
+            for t in c["terminals"]}
+    shell = os.environ.get("SHELL") or "sh"
+    for cwd in [worktree_path, *(c for _, c in (extra or []))]:
+        if cwd in have:
+            continue
+        try:
+            fleet_mux.Core().spawn([shell], cwd, labels=fleet_mux.context_labels(worktree_path, task, repo.path),
+                                   group=group)
+        except fleet_mux.MuxDown as e:
+            die(f"herdr-core couldn't open a terminal in {cwd}: {e}")
+    print(worktree_path)
+    return group
+
+
+def core_close(ctx: Context):
+    """End the context's terminals; this process's own last (it may be one of them)."""
+    me = fleet_mux.here()
+    refs = [t["address"] for t in ctx.get("terminals", [])]
+    for ref in sorted(refs, key=lambda r: r == me):
+        fleet_mux.Core().close(ref)
 
 
 # ---------------------------------------------------------------- process helpers
@@ -235,7 +304,10 @@ def add_git_worktree(repo: Repo, branch: str, worktree_path: str, start: str = "
 
 
 def open_worktree(repo: Repo, worktree_path: str, label: str) -> str:
-    """herdr workspace for a worktree already on disk (`herdr worktree create` runs the hooks)."""
+    """herdr workspace for a worktree already on disk (`herdr worktree create` runs the hooks).
+    On herdr-core, its group of terminals."""
+    if on_core():
+        return core_open(repo, worktree_path, label)
     opened = herdr_json(["worktree", "open", "--cwd", repo.path, "--path", worktree_path, "--label", label,
                          "--no-focus", "--json"])
     return opened["result"]["workspace"]["workspace_id"]
@@ -320,6 +392,8 @@ def infer_current_repo_alias() -> str:
 # ---------------------------------------------------------------- herdr contexts
 
 def list_contexts() -> list[Context]:
+    if on_core():
+        return core_contexts()
     workspaces = herdr_json(["workspace", "list"])["result"]["workspaces"]
     return [ws for ws in workspaces if (ws.get("worktree") or {}).get("is_linked_worktree")]
 
@@ -353,7 +427,12 @@ def focus_context_by_label(label: str, repos: Repos):
 
 def current_context() -> Context | None:
     contexts = list_contexts()
-    ws_id = os.environ.get("HERDR_WORKSPACE_ID")
+    me = fleet_mux.here()
+    if on_core() and me:
+        match = next((c for c in contexts if any(t.get("address") == me for t in c["terminals"])), None)
+        if match:
+            return match
+    ws_id = None if on_core() else os.environ.get("HERDR_WORKSPACE_ID")
     if ws_id:
         match = next((c for c in contexts if c["workspace_id"] == ws_id), None)
         if match:
@@ -366,14 +445,17 @@ def current_context() -> Context | None:
 
 
 def focus_workspace(workspace_id: str):
-    if os.environ.get("DEV_NO_FOCUS"):
-        return  # orchestration: create contexts without stealing the user's focus
+    if os.environ.get("DEV_NO_FOCUS") or on_core():
+        return  # orchestration: create contexts without stealing the user's focus; core: the app's job
     run_capture("herdr", ["workspace", "focus", workspace_id])
 
 
 def ensure_tabs(workspace_id: str, default_cwd: str, extra_tabs: list[tuple[str, str]] | None = None,
                 pane_name: str = ""):
-    """Rename the first tab `shell`, then add any missing extra tabs (cross siblings) and `agent`."""
+    """Rename the first tab `shell`, then add any missing extra tabs (cross siblings) and `agent`.
+    On herdr-core open_worktree already made the context's terminals."""
+    if on_core():
+        return
     tabs = herdr_json(["tab", "list", "--workspace", workspace_id])["result"]["tabs"]
     if not tabs:
         return
@@ -398,7 +480,7 @@ def ensure_tabs(workspace_id: str, default_cwd: str, extra_tabs: list[tuple[str,
 
 
 def list_agents() -> list[dict]:
-    return herdr_json(["agent", "list"])["result"]["agents"]
+    return fleet_mux.agents()
 
 
 def list_agent_cwds() -> list[str]:
@@ -421,6 +503,9 @@ def workspace_pids(workspace_id: str) -> set:
     """Shell pids of every pane in a herdr workspace; processes descending from them are owned
     by the workspace and are not "in use" from its own point of view."""
     pids: set = set()
+    if on_core():
+        return {t["pid"] for c in core_contexts() if c["workspace_id"] == workspace_id
+                for t in c["terminals"] if t.get("pid")}
     try:
         for p in herdr_json(["pane", "list", "--workspace", workspace_id])["result"]["panes"]:
             info = run_capture("herdr", ["pane", "process-info", "--pane", p["pane_id"]], check=False)
@@ -647,7 +732,7 @@ that is not a subcommand or configured repo alias.)
 
 
 def cmd_dashboard():
-    require_command("herdr")
+    require_mux()
 
     repos = load_repos()
     quiet_prune(repos)
@@ -693,7 +778,7 @@ def open_repo_from_dashboard(repos: Repos):
 
 
 def cmd_repo(alias: str, rest: list[str]):
-    require_command("herdr")
+    require_mux()
 
     repos = load_repos()
     repo = repos.get(alias)
@@ -736,7 +821,7 @@ def cmd_branch(rest: list[str]):
 
 
 def cmd_cross(rest: list[str]):
-    require_command("herdr")
+    require_mux()
 
     if len(rest) < 2:
         die("Usage: dev cross <task> <repo> [repo...]")
@@ -765,10 +850,13 @@ def cmd_cross(rest: list[str]):
         return worktree_path_of(repo.path, aliases[id(repo)], task)
 
     add_git_worktree(primary, task, worktree_path_for(primary))
-    workspace_id = open_worktree(primary, worktree_path_for(primary), task)
-
     for _, repo in others:
         add_git_worktree(repo, task, worktree_path_for(repo))
+    if on_core():
+        workspace_id = core_open(primary, worktree_path_for(primary), task,
+                                 [(alias, worktree_path_for(repo)) for alias, repo in others])
+    else:
+        workspace_id = open_worktree(primary, worktree_path_for(primary), task)
 
     for alias, repo in selected:
         bootstrap_worktree(worktree_path_for(repo), alias)
@@ -781,7 +869,7 @@ def cmd_cross(rest: list[str]):
 def cmd_pr_checkout(rest: list[str]):
     """Review a PR in its own worktree instead of `gh pr checkout` (which would switch whatever
     checkout the caller happens to be in, usually canonical)."""
-    require_command("herdr")
+    require_mux()
     require_command("gh")
     require_command("git")
 
@@ -832,7 +920,7 @@ def cmd_pr_checkout(rest: list[str]):
 
 
 def cmd_done(rest: list[str]):
-    require_command("herdr")
+    require_mux()
 
     force = "--force" in rest or "-f" in rest
     keep_branch = "--keep-branch" in rest
@@ -870,7 +958,7 @@ def cmd_done(rest: list[str]):
 
     # Focus the parent repo workspace first: removing the workspace kills the
     # pane this command runs in, so it must be the last thing we do.
-    inside_target = os.environ.get("HERDR_WORKSPACE_ID") == ctx["workspace_id"]
+    inside_target = not on_core() and os.environ.get("HERDR_WORKSPACE_ID") == ctx["workspace_id"]
     if inside_target:
         info = herdr_json(["worktree", "list", "--workspace", ctx["workspace_id"], "--json"])
         parent = ((info.get("result") or {}).get("source") or {}).get("source_workspace_id")
@@ -881,9 +969,14 @@ def cmd_done(rest: list[str]):
     repo = repos.get(alias_for_repo_root(repo_root, repos)) or Repo(repo_root, "main")
     merged = not keep_branch and branch_is_merged(repo, branch, ask_github=True)
     print(f"dev: removing {primary_path} (branch {branch} {'merged, deleting' if merged else 'kept'})")
-    run_capture("herdr", ["worktree", "remove", "--workspace", ctx["workspace_id"], *(["--force"] if force else [])])
+    if on_core():
+        run_inherit("git", ["-C", repo.path, "worktree", "remove", *(["--force"] if force else []), primary_path])
+    else:
+        run_capture("herdr", ["worktree", "remove", "--workspace", ctx["workspace_id"], *(["--force"] if force else [])])
     if merged:
         run_quiet("git", ["-C", repo.path, "branch", "-D", branch])
+    if on_core():
+        core_close(ctx)  # last: this command may run in one of them
 
 
 def cmd_prune(rest: list[str]):
@@ -894,7 +987,7 @@ def cmd_prune(rest: list[str]):
     ones are removed (branch kept, same contract as `dev done`); dirty ones are only reported —
     never deleted."""
     require_command("git")
-    require_command("herdr")
+    require_mux()
 
     dry_run = "--dry-run" in rest or "-n" in rest
     ask_github = "--all" in rest
@@ -949,7 +1042,10 @@ def prune(repos: Repos, dry_run: bool, ask_github: bool, verbose: bool) -> dict[
         if not os.path.exists(ctx["worktree"]["checkout_path"]):
             log(f"prune: closing workspace {ctx['label']} (checkout missing)")
             if not dry_run:
-                run_quiet("herdr", ["workspace", "close", ctx["workspace_id"]])
+                if on_core():
+                    core_close(ctx)
+                else:
+                    run_quiet("herdr", ["workspace", "close", ctx["workspace_id"]])
             summary["workspaces"] += 1
 
     # 3b. Idle workspaces whose branch is finished.
@@ -969,7 +1065,10 @@ def prune(repos: Repos, dry_run: bool, ask_github: bool, verbose: bool) -> dict[
             continue
         log(f"prune: closing workspace {ctx['label']} and removing {checkout} (branch {branch} merged)")
         if not dry_run:
-            run_capture("herdr", ["worktree", "remove", "--workspace", ctx["workspace_id"]], check=False)
+            if on_core():
+                core_close(ctx)
+            else:
+                run_capture("herdr", ["worktree", "remove", "--workspace", ctx["workspace_id"]], check=False)
             if os.path.exists(checkout):
                 run_quiet("git", ["-C", repo.path, "worktree", "remove", checkout])
             run_quiet("git", ["-C", repo.path, "branch", "-D", branch])

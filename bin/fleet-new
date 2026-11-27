@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
 import fleet_proc  # noqa: E402
+import fleet_mux  # noqa: E402
 from fleet_paths import NO_HOOKS, branch_name, count_worktrees, pick_lockfile, setup_command, warm_caches  # noqa: E402
 from fleet_paths import worktree_path  # noqa: E402
 
@@ -506,10 +507,15 @@ def classify(text, aliases, context=""):
 def open_sessions():
     """Agent panes that are working on something: what Jev compares a new request against."""
     try:
-        agents = herdr("agent", "list")["agents"]
-        names = {x["pane_id"]: x.get("label") for x in (lambda r: r.get("panes", r) if isinstance(r, dict) else r)(
-            herdr("pane", "list"))}
-        labels = {w["workspace_id"]: w.get("label") for w in herdr("workspace", "list")["workspaces"]}
+        if fleet_mux.is_core():  # hc rows carry their own names; groups are worktree names
+            agents = fleet_mux.agents()
+            names = {a["pane_id"]: a.get("label") for a in agents}
+            labels = {a["workspace_id"]: (a.get("labels") or {}).get(fleet_mux.TASK) for a in agents}
+        else:
+            agents = herdr("agent", "list")["agents"]
+            names = {x["pane_id"]: x.get("label") for x in (lambda r: r.get("panes", r) if isinstance(r, dict) else r)(
+                herdr("pane", "list"))}
+            labels = {w["workspace_id"]: w.get("label") for w in herdr("workspace", "list")["workspaces"]}
         with open(NOTES) as f:
             notes = json.load(f)
     except Exception:
@@ -881,7 +887,10 @@ def main(argv):
                 + "enter = go · r repos · n name · d description · a agent · m model · "
                 + ("p don't send the sentence" if send else "p start it on the sentence") + " · q cancel › ").strip().lower()
         if a == "j" and dup:
-            run("herdr", "agent", "focus", dup["pane"], check=False)
+            if fleet_mux.is_core():
+                print(f"it's {dup['pane']}: open it in the Herdr app, or `hc attach {dup['pane']}`")
+            else:
+                run("herdr", "agent", "focus", dup["pane"], check=False)
             return
         if a == "p":
             send = not send
@@ -960,6 +969,8 @@ def main(argv):
     set_note(primary, d["note"])
     if d.get("polish"):
         polish_later(primary, text, d["repos"])
+    if fleet_mux.is_core():
+        return start_on_core(d, primary, by_alias, installs, flags, kind, model, text, send, took, t_create)
     ws = workspace_for(primary)
     if not ws:
         die(f"worktree made at {primary} but no herdr workspace found for it")
@@ -976,6 +987,34 @@ def main(argv):
     how = "spare" if took else "new worktree"
     print(f"started {d['slug']} in {primary}  ({how}, ready in {time.monotonic() - t_create:.1f} s; "
           f"decided in {d.get('ms', '?')} ms via {d.get('via')})")
+
+
+def start_on_core(d, primary, by_alias, installs, flags, kind, model, text, send, took, t_create):
+    """herdr-core: dev made the context's shell terminal; setup runs in it, and the agent gets a
+    terminal of its own, both labelled with the context so every Herdr client groups them."""
+    core = fleet_mux.Core()
+    ctx_labels = fleet_mux.context_labels(primary, d["slug"], by_alias[d["repos"][0]]["path"])
+    group = os.path.basename(primary)
+    if installs:
+        shell = next((t["address"] for t in core.terminals() if (t.get("labels") or {}).get(fleet_mux.WORKTREE) == primary
+                      and t.get("state") != "finished" and not fleet_mux.is_agent(t)), None)
+        try:
+            if shell:
+                core.send(shell, install_steps(installs))
+            else:
+                core.spawn(["sh", "-c", install_steps(installs)], primary, labels=ctx_labels, group=group)
+        except fleet_mux.MuxDown as e:
+            print(f"fleet new: setup didn't start ({e}); run it yourself: {install_steps(installs)}", file=sys.stderr)
+    ref = None
+    if "--no-agent" not in flags:
+        try:
+            ref = core.spawn(launch_cmd(kind, model, text, send, bool(installs)), primary, name=d["slug"],
+                             labels=ctx_labels, group=group, kind=kind)
+        except fleet_mux.MuxDown as e:
+            die(f"worktree made at {primary} but herdr-core couldn't start {kind}: {e}")
+    how = "spare" if took else "new worktree"
+    print(f"started {d['slug']} in {primary}{f' as {ref}' if ref else ''}  ({how}, ready in "
+          f"{time.monotonic() - t_create:.1f} s; decided in {d.get('ms', '?')} ms via {d.get('via')})")
 
 
 if __name__ == "__main__":

@@ -174,14 +174,20 @@ def workers(home):
         yield path.parent, meta, lines[-1] if lines else ""
 
 
+def worker_status(name, meta):
+    """The multiplexer's word for a worker, on the backend it was started on; "-" if it can't say."""
+    import fleet_mux
+    try:
+        row = fleet_mux.get(name, meta.get("mux") or None)
+    except fleet_mux.MuxDown:  # a meta naming no known backend
+        row = None
+    return (row or {}).get("agent_status") or "-"
+
+
 def status(home):
     rows = []
     for directory, meta, last in workers(home):
-        try:
-            p = fleet_proc.run(["herdr", "agent", "get", directory.name], timeout=10)
-            agent = json.loads(p.stdout)["result"]["agent"]["agent_status"] if p.returncode == 0 else "-"
-        except (OSError, ValueError, KeyError, TypeError):
-            agent = "-"
+        agent = worker_status(directory.name, meta)
         turn = directory / "turn-ended"
         report = directory / "report.md"
         rows.append({"name": directory.name, "kind": meta.get("kind", ""), "herdr": agent,

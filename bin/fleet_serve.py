@@ -299,6 +299,64 @@ class HerdrEvents:
             s.close()
 
 
+class CoreEvents:
+    """HerdrEvents for herdr-core: `hc events` streams every terminal's changes, so there is nothing
+    to (re)subscribe per pane. on_change(address, status) for a status report (status in herdr's
+    words, via fleet_mux.core_status); on_change(address, None) for anything else about a terminal
+    (started, finished, a new foreground program, labels), which can change the agent set.
+    Reconnects with backoff when hc exits or isn't running."""
+
+    def __init__(self, list_panes, on_change, log=print):
+        self.on_change, self.log = on_change, log  # list_panes: HerdrEvents' signature; core needs none
+        self.connected = self.was_connected = False
+        self.events = 0
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True, name="core-events").start()
+        return self
+
+    def _run(self):
+        backoff = 1
+        while True:
+            try:
+                self._stream_once()
+                backoff = 1
+            except Exception as e:  # hc missing, core restarting, bad line: retry
+                self.log(f"core events: {type(e).__name__}: {e}"[:200])
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    def _stream_once(self):
+        import subprocess, fleet_mux
+        with subprocess.Popen(["hc", "events", "--json"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p:
+            try:
+                first = p.stdout.readline(MAX_EVENT_LINE)
+                if not first:
+                    raise RuntimeError("hc events ended before its snapshot")
+                self.connected = self.was_connected = True
+                for line in p.stdout:
+                    if len(line) > MAX_EVENT_LINE:
+                        raise RuntimeError("event line too long; reconnecting")
+                    params = (json.loads(line) or {}).get("params") or {}
+                    term, kind, data = params.get("terminal"), params.get("type"), params.get("data") or {}
+                    if not term:
+                        continue
+                    self.events += 1
+                    if kind == "status":
+                        self.on_change(term, fleet_mux.core_status({"state": "live", "status": data.get("status")}))
+                    else:
+                        self.on_change(term, None)
+            finally:
+                self.connected = False
+                p.kill()
+
+
+def events_for_backend():
+    """The event subscriber class for the configured multiplexer."""
+    import fleet_mux
+    return CoreEvents if fleet_mux.is_core() else HerdrEvents
+
+
 if __name__ == "__main__":
     op = sys.argv[1] if len(sys.argv) > 1 else "ping"
     if any(a in ("-h", "--help", "help") for a in sys.argv[1:]):

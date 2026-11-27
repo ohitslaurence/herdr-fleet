@@ -129,7 +129,8 @@ def save_state(s):
 
 
 def agents():
-    return fleet_proc.herdr_agents()  # raises HerdrDown: a pass must not read a dead herdr as "every pane gone"
+    import fleet_mux
+    return fleet_mux.agents()  # raises MuxDown: a pass must not read a dead multiplexer as "every pane gone"
 
 
 _REMOTE = {}
@@ -152,7 +153,7 @@ VETO_LINES = 400  # how far back the HUMAN veto reads: past anything an agent pr
 
 def pane_output(pane, lines=VETO_LINES):
     """The agent's output above its input box, minus status/footer noise, oldest first."""
-    out = run("herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", str(lines))
+    out = mux_read(pane, lines)
     if not out:
         return []
     raw = out.splitlines()
@@ -165,16 +166,22 @@ def last_message(pane):
     return "\n".join(pane_output(pane)[-12:])
 
 
+def mux_read(pane, lines):
+    """The pane's screen plus `lines` of history, "" if the multiplexer can't say."""
+    import fleet_mux
+    try:
+        return fleet_mux.mux().read(pane, lines=lines)
+    except fleet_mux.MuxDown:
+        return ""
+
+
 def agent_now(pane):
-    out = run("herdr", "agent", "get", pane)
-    if not out:
-        return None
-    r = json.loads(out).get("result", {})
-    return r.get("agent", r)
+    import fleet_mux
+    return fleet_mux.get(pane)
 
 
 def recent_text(pane, lines=120):
-    return run("herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", str(lines)) or ""
+    return mux_read(pane, lines)
 
 
 def pr_state(url):
@@ -350,7 +357,11 @@ class Watch:
     def prompt(self, pane, text):
         self.say(f"prompt {pane}: {text[:100]}")
         if not self.dry:
-            run("herdr", "agent", "prompt", pane, text)
+            import fleet_mux
+            try:
+                fleet_mux.mux().send(pane, text)
+            except fleet_mux.MuxDown as e:
+                self.say(f"prompt {pane} failed: {e}")
 
     def send(self, m):
         """Re-check, right before sending, that the message is still true and still needed.
@@ -674,7 +685,7 @@ def cmd_watch(argv):
             status["event_wakes"] += 1
             wake.set()
 
-        ev = fleet_serve.HerdrEvents(lambda: [a["pane_id"] for a in agents()], on_change, w.say).start()
+        ev = fleet_serve.events_for_backend()(lambda: [a["pane_id"] for a in agents()], on_change, w.say).start()
 
         def op_rows():
             return refresher.rows or refresher.collect()

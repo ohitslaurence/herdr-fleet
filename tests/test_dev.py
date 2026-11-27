@@ -1,6 +1,7 @@
 """dev: registry discovery, context create/reopen, cross, done, prune safety, pr-checkout.
 Run: python3 -m unittest discover -s tests   (no network: herdr, gh and npm are fake
 executables on PATH; repos are temp git repos cloned from local bare "origins")."""
+from unittest import mock
 import importlib.machinery, importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
@@ -536,5 +537,26 @@ class PrCheckout(DevTestCase):
         self.assertIn("PR #8 comes from a fork", r.stderr)
 
 
+class CoreContexts(unittest.TestCase):
+    """herdr-core: a context is a worktree plus its labelled terminals, with herdr's status rollup;
+    finished terminals stay in it so dev done removes them."""
+
+    def test_terminals_group_by_worktree(self):
+        dev = load_dev_module()
+        wt = "/home/ada/dev/api-wt-fix"
+        lab = {"fleet.worktree": wt, "fleet.task": "fix", "fleet.group": "api-wt-fix", "fleet.repo_root": "/home/ada/dev/api"}
+        terms = [{"address": "t1", "state": "live", "agent": "zsh", "labels": lab},
+                 {"address": "t2", "state": "live", "agent": "claude", "labels": dict(lab, **{"fleet.kind": "claude"}),
+                  "status": {"state": "blocked"}},
+                 {"address": "t3", "state": "finished", "agent": "codex", "labels": lab},
+                 {"address": "t4", "state": "live", "agent": "zsh", "labels": {}}]
+        with mock.patch.object(dev, "core_terminals", lambda: terms):
+            (ctx,) = dev.core_contexts()
+        self.assertEqual((ctx["workspace_id"], ctx["label"], ctx["agent_status"]), ("api-wt-fix", "fix", "blocked"))
+        self.assertEqual(ctx["worktree"]["checkout_path"], wt)
+        self.assertEqual([t["address"] for t in ctx["terminals"]], ["t1", "t2", "t3"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

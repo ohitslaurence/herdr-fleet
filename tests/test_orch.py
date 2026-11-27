@@ -225,6 +225,20 @@ case "$1 $2" in
   *) echo "fake herdr: $*" >&2; exit 1;;
 esac
 """
+FAKE_HC = r"""#!/usr/bin/env bash
+# herdr-core: run logs its argv and answers t9; read replays screens like FAKE_HERDR
+case "$1" in
+  run) shift; printf '%s\n' "$@" > "$FAKE/hc-run"; echo '{"address":"t9"}';;
+  read) n=$(( $(cat "$FAKE/reads" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE/reads"
+        while [[ $n -gt 1 && ! -f "$FAKE/screens/$n.txt" ]]; do n=$((n-1)); done
+        cat "$FAKE/screens/$n.txt";;
+  send) printf '%s\n' "$3" | head -n1 >> "$FAKE/prompts";;
+  keys) shift 2; echo "$*" >> "$FAKE/keys";;
+  get) echo "{\"address\":\"t9\",\"state\":\"live\",\"status\":{\"state\":\"$(cat "$FAKE/agent_status")\"}}";;
+  kill|rm) echo "$1 $2" >> "$FAKE/hc-closed";;
+  *) echo "fake hc: $*" >&2; exit 1;;
+esac
+"""
 FAKE_DEV = r"""#!/usr/bin/env bash
 [[ "$1 $2" == "repos --json" ]] && echo "{\"repos\":[{\"alias\":\"api\",\"path\":\"$FAKE/api\",\"defaultBranch\":\"main\"}]}"
 """
@@ -241,7 +255,7 @@ class StartAndWait(unittest.TestCase):
         os.makedirs(os.path.join(self.fake, "screens"))
         os.makedirs(os.path.join(self.home, ".config", "fleet"))
         os.makedirs(os.path.join(self.fake, "api-wt-w1"))  # the worktree exists: no git
-        for name, body in (("herdr", FAKE_HERDR), ("dev", FAKE_DEV)):
+        for name, body in (("herdr", FAKE_HERDR), ("dev", FAKE_DEV), ("hc", FAKE_HC)):
             path = os.path.join(self.fake, "bin", name)
             with open(path, "w") as f:
                 f.write(body)
@@ -256,12 +270,15 @@ class StartAndWait(unittest.TestCase):
             with open(os.path.join(self.fake, "screens", f"{i}.txt"), "w") as f:
                 f.write(t)
 
-    def orch(self, *args, tick="0.002", pane=""):
+    def orch(self, *args, tick="0.002", pane="", **extra):
         env = dict(os.environ, HOME=self.home, FAKE=self.fake, ORCH_TICK=tick, HERDR_WORKSPACE_ID="wT",
-                   HERDR_PANE_ID=pane,
+                   HERDR_PANE_ID=pane, **extra,
                    ORCH_HOME=os.path.join(self.fake, "state"),
                    PATH=f"{os.path.join(self.fake, 'bin')}:{os.path.join(ROOT, 'bin')}:{SYSTEM_PATH}")
         env.pop("HERDR_SOCKET_PATH", None)
+        for k in ("FLEET_MUX", "HC_TERMINAL_ID"):
+            if k not in extra:
+                env.pop(k, None)
         return subprocess.run([os.path.join(ROOT, "bin", "orch"), *args], capture_output=True, text=True, env=env,
                               timeout=60, stdin=subprocess.DEVNULL)
 
@@ -286,6 +303,32 @@ class StartAndWait(unittest.TestCase):
         self.assertIn("started w1 (claude) in wT wT:p9", p.stdout)
         self.assertEqual(self.read("prompts").splitlines(), [BRIEF_FIRST])
         self.assertIn(f"worktree {self.fake}/api-wt-w1", self.read(os.path.join("state", "w1", "brief.md")))
+
+    def test_core_starts_a_labelled_terminal_and_records_its_backend(self):
+        self.screens(CODEX_COMPOSER, "• Working (3s • esc to interrupt)")
+        p = self.orch("start", "w1", "--repo", "api", "--brief", os.path.join(self.fake, "brief.md"),
+                      "--kind", "codex", FLEET_MUX="core", HC_TERMINAL_ID="t1")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        run = self.read("hc-run").splitlines()
+        self.assertIn("fleet.group=api-wt-w1", run)
+        self.assertIn("fleet.by=t1", run)
+        cmd = run[run.index("--") + 1:]
+        self.assertEqual(cmd[:2], ["codex", "--no-daemon"])  # else Codex runs commands outside hc
+        meta = self.read(os.path.join("state", "w1", "meta"))
+        self.assertIn("mux=core", meta)
+        self.assertIn("placement=core", meta)
+        self.assertIn("pane=t9", meta)
+        self.assertEqual(self.read("started"), "")  # no herdr call
+        self.assertEqual(self.read("prompts").splitlines(), [BRIEF_FIRST])
+
+    def test_core_worker_is_driven_on_core_after_the_config_changes(self):
+        self.screens(CLAUDE_COMPOSER, "✻ Thinking… (esc to interrupt)")
+        self.orch("start", "w1", "--repo", "api", "--brief", os.path.join(self.fake, "brief.md"),
+                  "--kind", "claude", FLEET_MUX="core")
+        os.remove(os.path.join(self.fake, "prompts"))
+        p = self.orch("prompt", "w1", "carry on")  # no FLEET_MUX now: meta says core
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.read("prompts").splitlines(), ["carry on"])
 
     def test_wait_warns_when_no_watcher_will_report_back(self):
         p = self.orch("wait", "--timeout", "1")
