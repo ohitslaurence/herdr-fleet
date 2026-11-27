@@ -62,7 +62,8 @@ is_terminal() { case "$1" in done|failed|blocked|needs-decision) return 0;; *) r
 
 # The multiplexer seam (bin/fleet_mux.py). wmux <worker> <verb>...: on the backend that worker was
 # started on (meta mux=), whatever [mux] backend says now. A worker whose meta has no mux= predates
-# backends and runs in herdr; one with no meta yet is being started, on the configured backend.
+# backends and runs in herdr (fleet_orch.worker_backend / fleet_mux.LEGACY_BACKEND); one with no
+# meta yet is being started, on the configured backend.
 mux() { python3 "$BIN/fleet_mux.py" "$@"; }
 wmux() {
   local meta="$ORCH_HOME/$1/meta" m=""; shift

@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_proc  # noqa: E402
 
 BACKENDS = ("herdr", "core")
+LEGACY_BACKEND = "herdr"  # where anything recorded before backends existed (an orch meta without mux=) runs
 STATUSES = ("idle", "working", "blocked", "done", "unknown")
 
 # Labels fleet writes on a core terminal (docs/herdr-core.md). Read and write them by these names.

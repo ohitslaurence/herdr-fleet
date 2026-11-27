@@ -335,7 +335,9 @@ class StartAndWait(unittest.TestCase):
         self.start()  # on herdr
         meta = os.path.join(self.fake, "state", "w1", "meta")
         with open(meta) as f:
-            lines = [l for l in f if not l.startswith("mux=")]  # what a pre-#16 worker's meta looks like
+            lines = f.readlines()
+        self.assertIn("mux=herdr\n", lines)  # the line a worker from before backends lacks
+        lines = [l for l in lines if not l.startswith("mux=")]
         with open(meta, "w") as f:
             f.writelines(lines)
         os.remove(os.path.join(self.fake, "prompts"))

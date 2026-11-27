@@ -174,11 +174,18 @@ def workers(home):
         yield path.parent, meta, lines[-1] if lines else ""
 
 
+def worker_backend(meta):
+    """The backend a worker runs on: its meta's mux=, or fleet_mux.LEGACY_BACKEND for a worker
+    started before backends existed (orch's wmux applies the same rule in bash)."""
+    import fleet_mux
+    return meta.get("mux") or fleet_mux.LEGACY_BACKEND
+
+
 def worker_status(name, meta):
     """The multiplexer's word for a worker, on the backend it was started on; "-" if it can't say."""
     import fleet_mux
     try:
-        row = fleet_mux.get(name, meta.get("mux") or "herdr")  # no mux=: started before backends, in herdr
+        row = fleet_mux.get(name, worker_backend(meta))
     except fleet_mux.MuxDown:  # a meta naming no known backend
         row = None
     return (row or {}).get("agent_status") or "-"
