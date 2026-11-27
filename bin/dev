@@ -73,8 +73,8 @@ def core_contexts() -> list[Context]:
     for t in core_terminals():
         labels = t.get("labels") or {}
         wt = labels.get("fleet.worktree")
-        if not wt or t.get("state") == "finished":
-            continue
+        if not wt:
+            continue  # finished terminals stay: dev done and prune remove them with the context
         ctx = by.setdefault(wt, {"workspace_id": labels.get("fleet.group") or os.path.basename(wt),
                                  "label": labels.get("fleet.task") or os.path.basename(wt),
                                  "worktree": {"checkout_path": wt, "repo_root": labels.get("fleet.repo_root", ""),

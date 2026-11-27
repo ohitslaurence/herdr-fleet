@@ -169,7 +169,7 @@ def _core_row(t):
             or fg.get("name"), "status": core_status(t), "cwd": fg.get("cwd") or t.get("cwd"),
             "group": labels.get(LABEL + "group"), "title": t.get("title") or "",
             "session": labels.get(LABEL + "session"), "labels": labels,
-            "msg": (t.get("status") or {}).get("msg")}
+            "msg": (t.get("status") or {}).get("msg"), "state": t.get("state")}
 
 
 AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
@@ -274,7 +274,9 @@ def agent_row(ref):
 
 
 def _is_agent(r):
-    return r["kind"] in AGENT_PROGRAMS or (LABEL + "kind") in r["labels"]
+    """A live terminal running an agent. A finished one stays listed in hc until removed, but
+    its agent is gone (herdr drops the pane): not an agent."""
+    return r.get("state") != "finished" and (r["kind"] in AGENT_PROGRAMS or (LABEL + "kind") in r["labels"])
 
 
 def mux():

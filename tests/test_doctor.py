@@ -133,6 +133,14 @@ class Judges(unittest.TestCase):
         self.assertEqual(D.judge_herdr("0.10.0", "0.9.0", "0.9.5", 3)["status"], "warn")  # 10 > 9, not "0.10" < "0.9"
         self.assertIn("isn't answering", D.judge_herdr("0.9.5", "0.9.0", "0.9.5", "socket gone")["summary"])
 
+    def test_core_versions_and_status_support(self):
+        got = {x["id"]: x["status"] for x in D.judge_core("0.1.22", "0.1.22", 2, {"claude": "2.1.332", "codex": "0.153.4",
+                                                                                "opencode": "2.1.4", "pi": None})}
+        self.assertEqual(got, {"core": "ok", "core.status.claude": "ok", "core.status.codex": "warn",
+                               "core.status.opencode": "warn"})  # pi not installed: nothing to say
+        self.assertEqual(D.judge_core("0.2.0", "0.1.22", 0, {})[0]["status"], "warn")  # 0.2 > 0.1.22
+        self.assertEqual(D.judge_core("0.1.22", "0.1.22", "no core", {})[0]["status"], "fail")
+
     def test_watcher(self):
         now = 1_800_000_000
         fresh = D.time.strftime("%Y-%m-%dT%H:%M:%SZ", D.time.gmtime(now - 60))
