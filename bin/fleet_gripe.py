@@ -74,7 +74,8 @@ def gripe(argv, env=None, cwd=None):
     env = os.environ if env is None else env
     cwd = cwd or os.getcwd()
     text, extra = parse(argv)
-    pane = env.get("HERDR_PANE_ID")
+    import fleet_mux
+    pane = fleet_mux.here(env)
     entry = {"at": now().isoformat(timespec="seconds"), "text": clean(text),
              **{k: clean(v) for k, v in extra.items()},
              "kind": fleet_proc.env_agent_kind(env), "pane": pane, "worker": worker_of(pane),

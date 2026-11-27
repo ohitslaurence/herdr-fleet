@@ -45,16 +45,21 @@ def backend():
     return b
 
 
-def here():
-    """This process's own terminal ref, or None outside one."""
-    if backend() == "core":
-        return os.environ.get("HC_TERMINAL_ID") or None
-    return os.environ.get("HERDR_PANE_ID") or None
+def here(env=None):
+    """This process's own terminal ref, or None outside one. An hc terminal started from a herdr
+    pane would inherit its HERDR_PANE_ID, so HC_TERMINAL_ID (the innermost) wins on any backend."""
+    env = os.environ if env is None else env
+    return env.get("HC_TERMINAL_ID") or env.get("HERDR_PANE_ID") or None
 
 
-def _call(prog, args, timeout=10):
+# herdr's variables, dropped from a terminal fleet starts on core: an agent there that saw the
+# orchestrator's HERDR_PANE_ID would report and act as that pane.
+HERDR_ENV = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH")
+
+
+def _call(prog, args, timeout=10, env=None):
     try:
-        p = fleet_proc.run([prog, *args], timeout=timeout)
+        p = fleet_proc.run([prog, *args], timeout=timeout, **({"env": env} if env is not None else {}))
     except FileNotFoundError:
         raise MuxDown(f"{prog} isn't on PATH") from None
     if p.returncode:
@@ -62,8 +67,8 @@ def _call(prog, args, timeout=10):
     return p.stdout
 
 
-def _json(prog, args, timeout=10):
-    out = _call(prog, args, timeout)
+def _json(prog, args, timeout=10, env=None):
+    out = _call(prog, args, timeout, env)
     try:
         return json.loads(out)
     except ValueError:
@@ -222,7 +227,8 @@ class Core:
             args += ["--name", name]
         for k, v in labels.items():
             args += ["--label", f"{k}={v}"]
-        return _json("hc", [*args, "--", *argv], timeout=30)["address"]
+        env = {k: v for k, v in os.environ.items() if k not in HERDR_ENV}
+        return _json("hc", [*args, "--", *argv], timeout=30, env=env)["address"]
 
     def label(self, ref, **kv):
         _call("hc", ["label", ref, *(f"{k}={v}" for k, v in kv.items())])

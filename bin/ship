@@ -884,16 +884,18 @@ def review_state(f, now, pol, s, hfiles, out, pending):
 
 # ── actions ──────────────────────────────────────────────────────────────────
 
+def fleet_mux_here():
+    import fleet_mux
+    return fleet_mux.here()
+
+
 def author_kind():
-    pane = os.environ.get("HERDR_PANE_ID")
+    import fleet_mux
+    pane = fleet_mux_here()
     if pane:
-        try:
-            d = json.loads(run("herdr", "agent", "list", check=False) or "{}")
-            for a in d.get("result", {}).get("agents", []):
-                if a.get("pane_id") == pane and a.get("agent") in ("claude", "codex"):
-                    return a["agent"]
-        except (json.JSONDecodeError, FileNotFoundError):
-            pass
+        a = fleet_mux.agent_row(pane) or {}
+        if a.get("agent") in ("claude", "codex"):
+            return a["agent"]
     return proc.env_agent_kind(os.environ)
 
 
@@ -1032,7 +1034,7 @@ def record(s):
     prev = last_record(s["repo"], s["number"]) or {}
     # The cockpit re-runs ship from elsewhere: only a run inside the PR's checkout says where it lives.
     here = on_branch(s["branch"])
-    s = dict(s, pane=(os.environ.get("HERDR_PANE_ID") if here else None) or prev.get("pane"),
+    s = dict(s, pane=(fleet_mux_here() if here else None) or prev.get("pane"),
              cwd=worktree_root() if here else prev.get("cwd"),
              author=author_kind() or prev.get("author"),
              after_deploy=s.get("after_deploy") or prev.get("after_deploy"))

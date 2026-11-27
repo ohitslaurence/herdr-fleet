@@ -43,12 +43,11 @@ class Backend(unittest.TestCase):
             with self.assertRaises(fleet_mux.MuxDown):
                 fleet_mux.backend()
 
-    def test_here_follows_the_backend(self):
-        env = {"HC_TERMINAL_ID": "t4", "HERDR_PANE_ID": "w1:p2"}
-        with mock.patch.dict(os.environ, dict(env, FLEET_MUX="core")):
-            self.assertEqual(fleet_mux.here(), "t4")
-        with mock.patch.dict(os.environ, dict(env, FLEET_MUX="herdr")):
-            self.assertEqual(fleet_mux.here(), "w1:p2")
+    def test_here_is_the_innermost_terminal(self):
+        # an hc terminal started from a herdr pane inherits HERDR_PANE_ID: it is still the hc terminal
+        self.assertEqual(fleet_mux.here({"HC_TERMINAL_ID": "t4", "HERDR_PANE_ID": "w1:p2"}), "t4")
+        self.assertEqual(fleet_mux.here({"HERDR_PANE_ID": "w1:p2"}), "w1:p2")
+        self.assertIsNone(fleet_mux.here({}))
 
 
 class FakeBins(unittest.TestCase):
@@ -96,6 +95,15 @@ class FakeBins(unittest.TestCase):
         self.assertIn("fleet.kind=claude", argv)
         self.assertIn("fleet.by=t1", argv)
         self.assertEqual(argv[argv.index("--") + 1:], ["claude", "--effort", "high"])
+
+    def test_core_spawn_drops_herdrs_variables(self):
+        self.fake("hc", "import os; open(os.environ['ENVLOG'], 'w').write(os.environ.get('HERDR_PANE_ID', 'unset')); print(json.dumps({'address': 't9'}))")
+        envlog = os.path.join(self.dir, "env")
+        env = dict(os.environ, FLEET_MUX="core", PATH=f"{self.dir}:{SYSTEM_PATH}", HERDR_PANE_ID="w1:p1", ENVLOG=envlog)
+        subprocess.run([sys.executable, os.path.join(BIN, "fleet_mux.py"), "spawn", "--cwd", "/w", "--", "claude"],
+                       env=env, capture_output=True, timeout=30)
+        with open(envlog) as f:
+            self.assertEqual(f.read(), "unset")
 
     def test_read_visible_is_screen_only(self):
         self.fake("hc", "print('screen')")

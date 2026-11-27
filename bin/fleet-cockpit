@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
 from fleet_proc import HerdrDown, herdr_agents  # noqa: E402
+import fleet_mux  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
 LEDGER = os.path.join(STATE_DIR, "ledger")
@@ -159,7 +160,7 @@ def cmd_note(args):
         if len(text) > 160:
             sys.exit("fleet note: keep it to one sentence (160 chars max)")
         entry = {"text": text, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                 "pane": os.environ.get("HERDR_PANE_ID"), "by": "agent"}
+                 "pane": fleet_mux.here(), "by": "agent"}
         notes = update(NOTES, lambda n: n.__setitem__(root, entry))
     print(f"noted for {os.path.basename(root)}: {notes.get(root, {}).get('text', '(cleared)')}")
 
