@@ -140,6 +140,9 @@ class Judges(unittest.TestCase):
                                "core.status.opencode": "warn"})  # pi not installed: nothing to say
         self.assertEqual(D.judge_core("0.2.0", "0.1.22", 0, {})[0]["status"], "warn")  # 0.2 > 0.1.22
         self.assertEqual(D.judge_core("0.1.22", "0.1.22", "no core", {})[0]["status"], "fail")
+        leak = D.judge_core("0.1.22", "0.1.22", 0, {}, ["CLAUDE_CODE_CHILD_SESSION"])[-1]
+        self.assertEqual((leak["id"], leak["status"]), ("core.env", "warn"))
+        self.assertIn("CLAUDE_CODE_CHILD_SESSION", leak["summary"])
 
     def test_watcher(self):
         now = 1_800_000_000

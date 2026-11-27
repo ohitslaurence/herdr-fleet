@@ -15,6 +15,16 @@ def term(addr, status=None, turn=0, labels=None, state="live", agent="claude", n
             "labels": labels or {}, "status": status, "foreground": {"name": agent, "cwd": "/w/sub"}}
 
 
+def program(hc_run_argv):
+    """The command an `hc run` call starts, without fleet's `env -u ...` wrapper."""
+    cmd = hc_run_argv[hc_run_argv.index("--") + 1:]
+    assert cmd[0] == "env", cmd
+    i = 1
+    while cmd[i] == "-u":
+        i += 2
+    return cmd[i:]
+
+
 class CoreStatus(unittest.TestCase):
     def test_words_map_to_herdrs(self):
         self.assertEqual(fleet_mux.core_status(term("t1", {"state": "working"})), "working")
@@ -95,16 +105,22 @@ class FakeBins(unittest.TestCase):
         self.assertIn("fleet.group=api-wt-fix", argv)
         self.assertIn("fleet.kind=claude", argv)
         self.assertIn("fleet.by=t1", argv)
-        self.assertEqual(argv[argv.index("--") + 1:], ["claude", "--effort", "high"])
+        self.assertEqual(program(argv), ["claude", "--effort", "high"])
 
-    def test_core_spawn_drops_herdrs_variables(self):
-        self.fake("hc", "import os; open(os.environ['ENVLOG'], 'w').write(os.environ.get('HERDR_PANE_ID', 'unset')); print(json.dumps({'address': 't9'}))")
-        envlog = os.path.join(self.dir, "env")
-        env = dict(os.environ, FLEET_MUX="core", PATH=f"{self.dir}:{SYSTEM_PATH}", HERDR_PANE_ID="w1:p1", ENVLOG=envlog)
-        subprocess.run([sys.executable, os.path.join(BIN, "fleet_mux.py"), "spawn", "--cwd", "/w", "--", "claude"],
-                       env=env, capture_output=True, timeout=30)
+    def test_core_programs_start_without_the_hc_servers_agent_session(self):
+        # hc gives a terminal its server's environment; a server started inside an agent has that
+        # agent's markers. This fake hc runs the command the way hc would, from such an environment.
+        keys = ["HERDR_PANE_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_USE_BEDROCK"]
+        envlog, probe = os.path.join(self.dir, "env"), os.path.join(self.dir, "probe.py")
+        with open(probe, "w") as f:
+            f.write(f"import json, os\nopen({envlog!r}, 'w').write(json.dumps([k for k in {keys!r} if k in os.environ]))\n")
+        self.fake("hc", f"import os, subprocess\n"
+                        f"subprocess.run(sys.argv[sys.argv.index('--') + 1:], env=dict(os.environ, **dict.fromkeys({keys!r}, '1')))\n"
+                        f"print(json.dumps({{'address': 't9'}}))")
+        p = self.run_mux("core", "spawn", "--cwd", "/w", "--", sys.executable, probe)
+        self.assertEqual(p.returncode, 0, p.stderr)
         with open(envlog) as f:
-            self.assertEqual(f.read(), "unset")
+            self.assertEqual(json.load(f), ["CLAUDE_CODE_USE_BEDROCK"])  # your own settings still pass
 
     def test_read_visible_is_screen_only(self):
         self.fake("hc", "print('screen')")
@@ -112,11 +128,20 @@ class FakeBins(unittest.TestCase):
         self.run_mux("core", "read", "t2", "--lines", "80")
         self.assertEqual(self.calls(), [["read", "t2"], ["read", "t2", "--lines", "80"]])
 
-    def test_core_spawn_adds_no_daemon_for_codex(self):
+    def test_core_spawn_adds_no_daemon_for_a_codex_that_takes_it(self):
         self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.fake("codex", "print('      --no-daemon  run in this terminal')")
         self.run_mux("core", "spawn", "--cwd", "/w", "--kind", "codex", "--", "codex", "--yolo")
-        argv = self.calls()[0]
-        self.assertEqual(argv[argv.index("--") + 1:], ["codex", "--no-daemon", "--yolo"])
+        argv = next(c for c in self.calls() if c[:1] == ["run"])
+        self.assertEqual(program(argv), ["codex", "--no-daemon", "--yolo"])
+
+    def test_core_spawn_leaves_an_older_codex_alone(self):
+        # codex 0.153 has no --no-daemon: passing it makes codex exit at once
+        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.fake("codex", "print('      --no-alt-screen')")
+        self.run_mux("core", "spawn", "--cwd", "/w", "--kind", "codex", "--", "codex", "--yolo")
+        argv = next(c for c in self.calls() if c[:1] == ["run"])
+        self.assertEqual(program(argv), ["codex", "--yolo"])
 
     def test_cli_help_anywhere_does_nothing_else(self):
         self.fake("hc", "print(json.dumps({'address': 't9'}))")
@@ -146,6 +171,14 @@ class FakeBins(unittest.TestCase):
         self.assertEqual(self.calls(), [["agent", "prompt", "fix", "do it"], ["agent", "send-keys", "fix", "down", "enter"],
                                         ["agent", "read", "fix", "--source", "recent-unwrapped", "--lines", "80"],
                                         ["agent", "get", "fix"]])
+
+    def test_hc_error_kind_is_kept(self):
+        err = {"error": {"kind": "name_taken", "message": 'a live terminal is already named "fix"', "hint": "x"}}
+        self.fake("hc", f"sys.stderr.write(json.dumps({err!r}) + '\\n'); sys.exit(1)")
+        with mock.patch.dict(os.environ, {"PATH": f"{self.dir}:{SYSTEM_PATH}"}):
+            with self.assertRaises(fleet_mux.MuxDown) as cm:
+                fleet_mux.Core().spawn(["claude"], "/w", name="fix")
+        self.assertEqual((cm.exception.kind, str(cm.exception)), ("name_taken", 'a live terminal is already named "fix"'))
 
     def test_down_is_an_error_not_empty(self):
         self.fake("hc", "sys.stderr.write('core is not running\\n'); sys.exit(1)")

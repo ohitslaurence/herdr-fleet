@@ -81,7 +81,7 @@ READ (run freely):
 `fleet ls [--json]` · `fleet inbox [--json]` · `fleet why` · `fleet config show [key]` ·
 `fleet doctor` · `fleet version` · `fleet server status` · `fleet keys status` · `fleet learn` · `fleet gripes --json` ·
 `fleet update --check` · `fleet mux backend` / `fleet mux agents` (which multiplexer hosts the agents,
-herdr or herdr-core, and what it sees) · `ship pr <ref>` · `ship [<pr>] --json` · `ship findings` ·
+herdr or herdr-core, and what it sees) · `fleet migrate --dry-run --all` · `ship pr <ref>` · `ship [<pr>] --json` · `ship findings` ·
 `ship policy` · `ship guide <topic>` · `dev ls` · `dev repos` · `orch status` · `orch report <n>`
 
 WRITE (in your own worktree or PR):
@@ -92,7 +92,7 @@ WRITE (in your own worktree or PR):
 
 ASK FIRST (affects other agents or the machine):
 `fleet new "<repo>, <what>"` · `orch start|prompt` (the `orchestrate` skill) ·
-`herdr agent prompt` · `fleet server start|restart` · `fleet learn --propose` (spends a model call)
+`herdr agent prompt` · `fleet migrate` (restarts other agents on herdr-core) · `fleet server start|restart` · `fleet learn --propose` (spends a model call)
 
 HUMAN ONLY: merging, closing PRs, `dev done`, `fleet setup apply`, `fleet keys set|unset`,
 `fleet server install|uninstall`, `fleet skills install`, `fleet update`, `fleet uninstall`,

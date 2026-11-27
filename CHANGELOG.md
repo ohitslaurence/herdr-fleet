@@ -14,6 +14,13 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
   tabs, and agent status is what the agent reports over OSC 7501 (Claude Code 2.1.295+; older
   Codex shows `unknown`, and doctor says so). herdr stays the default; see docs/herdr-core.md.
   `fleet mux` exposes the seam both backends sit behind.
+- New: `fleet migrate [--dry-run] --all|<pane>...` moves idle herdr agents onto herdr-core by
+  resuming their sessions in the same worktree, with their own flags; fleet's records of each
+  (orch meta, ship ledgers, notes, inbox) follow it. A failed resume leaves the herdr pane alone.
+- Fix (herdr-core): programs fleet starts there could inherit the agent that first started hc
+  (its herdr pane, and Claude Code's child-session marker, under which a resumed Claude saves no
+  transcript). Fleet now unsets them in everything it starts, and `fleet doctor` warns when hc's
+  terminals would inherit them. Codex older than its `--no-daemon` flag no longer exits at once on core.
 - Fix: a new worktree's setup ran the wrong package manager when a repo carried a stray lockfile
   (yarn in an npm repo); package.json's `packageManager` now decides, for the install and for the
   spare's lockfile check. New `[setup] after` steps run once the install is done (e.g. `sst install`
