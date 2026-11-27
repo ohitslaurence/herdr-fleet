@@ -47,7 +47,7 @@ with labels, which every Herdr client can read:
 
 | Tool | On herdr-core |
 |---|---|
-| `orch start` | A worktree with dev's naming, and the worker in its own terminal named after it, labelled with its group and its orchestrator (`fleet.by`). No `--tab`/`--workspace`. The worker's meta records `mux=core`, so later `orch` commands drive it on core whatever the config says by then. |
+| `orch start` | A worktree with dev's naming, and the worker in its own terminal named after it, labelled with its group and its orchestrator (`fleet.by`). No `--tab`/`--workspace`. The worker's meta records `mux=core`, so later `orch` commands drive it on core whatever the config says by then. Workers started before backends existed (no `mux=`) stay on herdr after you switch. |
 | `dev <repo> <task>` | The worktree, plus a shell terminal labelled with it. Prints the path instead of focusing (the app shows it). `dev done` / `dev prune` end the context's terminals and remove the worktree. |
 | `fleet new` | dev's context; setup runs in its shell terminal; the agent gets a terminal of its own named after the session. |
 | `fleet watch` | Wakes on `hc events` instead of herdr's socket; reads and prompts agents with `hc read` / `hc send`. |

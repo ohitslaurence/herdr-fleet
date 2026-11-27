@@ -47,6 +47,12 @@ class Status(unittest.TestCase):
             self.assertEqual(json.loads(p.stdout), {"workers": [{"name": "worker", "kind": "codex",
                 "herdr": "idle", "state": "done", "status": "done: shipped", "turn_minutes": None, "report": True}]})
 
+    def test_worker_without_mux_is_asked_on_herdr_even_when_configured_for_core(self):
+        self.worker("working: x\n")
+        self.env["FLEET_MUX"] = "core"  # hc isn't on this PATH: asking core would say "-"
+        p = self.run_orch("--json", "status")
+        self.assertEqual(json.loads(p.stdout)["workers"][0]["herdr"], "idle")
+
     def test_text_uses_same_worker_data(self):
         directory = self.worker("working: checking\n")
         (directory / "report.md").write_text("report")
