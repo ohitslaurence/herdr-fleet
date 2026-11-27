@@ -684,7 +684,7 @@ def cmd_watch(argv):
             status["event_wakes"] += 1
             wake.set()
 
-        ev = fleet_serve.HerdrEvents(lambda: [a["pane_id"] for a in agents()], on_change, w.say).start()
+        ev = fleet_serve.events_for_backend()(lambda: [a["pane_id"] for a in agents()], on_change, w.say).start()
 
         def op_rows():
             return refresher.rows or refresher.collect()

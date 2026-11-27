@@ -216,6 +216,32 @@ class FakeHerdr:
             c.close()
 
 
+class CoreEventsStream(unittest.TestCase):
+    """herdr-core: one `hc events` stream covers every terminal; a status report wakes the watch
+    with herdr's word for it, anything else about a terminal wakes it with None."""
+
+    def test_status_and_lifecycle_events(self):
+        d = tempfile.mkdtemp()
+        lines = [{"seq": 1, "terminals": []},
+                 {"method": "event", "params": {"terminal": "t2", "type": "status",
+                                                "data": {"status": {"state": "error"}}}},
+                 {"method": "event", "params": {"terminal": "t3", "type": "finished", "data": {}}}]
+        hc = os.path.join(d, "hc")
+        with open(hc, "w") as f:
+            f.write("#!/bin/sh\ncat <<'EOF'\n" + "\n".join(json.dumps(l) for l in lines) + "\nEOF\nsleep 30\n")
+        os.chmod(hc, 0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{d}:{old}"
+        self.addCleanup(os.environ.__setitem__, "PATH", old)
+        seen = []
+        ev = F.CoreEvents(None, lambda t, st: seen.append((t, st)), log=lambda m: None).start()
+        deadline = time.time() + 5
+        while len(seen) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(seen, [("t2", "blocked"), ("t3", None)])
+        self.assertTrue(ev.connected)
+
+
 class Events(unittest.TestCase):
     def start(self, herdr, panes):
         os.environ["HERDR_SOCKET_PATH"] = herdr.path
