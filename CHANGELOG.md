@@ -8,6 +8,12 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 
 ## Unreleased
 
+- New: run the fleet on herdr-core (`hc`), the runtime the Herdr desktop and phone apps are built on.
+  Set `[mux] backend = "core"` (or `FLEET_MUX=core`). orch, dev, fleet new, the watcher, ship,
+  the cockpit and doctor all work there: workers and sessions are labelled terminals instead of
+  tabs, and agent status is what the agent reports over OSC 7501 (Claude Code 2.1.295+; older
+  Codex shows `unknown`, and doctor says so). herdr stays the default; see docs/herdr-core.md.
+  `fleet mux` exposes the seam both backends sit behind.
 - Fix: a new worktree's setup ran the wrong package manager when a repo carried a stray lockfile
   (yarn in an npm repo); package.json's `packageManager` now decides, for the install and for the
   spare's lockfile check. New `[setup] after` steps run once the install is done (e.g. `sst install`
