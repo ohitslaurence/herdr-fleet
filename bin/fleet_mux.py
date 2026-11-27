@@ -217,6 +217,9 @@ class Core:
         _call("hc", ["keys", ref, *keys])
 
     def spawn(self, argv, cwd, name=None, labels=None, group=None, kind=None):
+        argv = list(argv)
+        if kind == "codex" and "--no-daemon" not in argv:
+            argv.insert(1, "--no-daemon")  # else Codex's daemon runs its commands outside the terminal
         labels = dict(labels or {})
         if group:
             labels[LABEL + "group"] = group

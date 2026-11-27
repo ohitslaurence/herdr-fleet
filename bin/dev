@@ -81,7 +81,14 @@ def core_contexts() -> list[Context]:
                                               "is_linked_worktree": True},
                                  "terminals": []})
         ctx["terminals"].append(t)
+        if fleet_mux._is_agent(fleet_mux._core_row(t)):  # the workspace's agent_status, as herdr rolls it up
+            st = fleet_mux.core_status(t)
+            if URGENCY.index(st) < URGENCY.index(ctx.get("agent_status") or "unknown"):
+                ctx["agent_status"] = st
     return list(by.values())
+
+
+URGENCY = ("blocked", "working", "done", "idle", "unknown")
 
 
 def core_labels(repo: Repo, worktree_path: str, task: str) -> dict[str, str]:

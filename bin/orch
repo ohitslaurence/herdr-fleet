@@ -170,8 +170,6 @@ PY
   local -a args
   case "$kind" in
     codex)
-      # --no-daemon: under herdr-core a Codex daemon would run its commands outside the terminal
-      [[ "$backend" == core ]] && args+=(--no-daemon)
       # check_for_update_on_startup: an update prompt blocks an unattended worker at launch
       args+=(--dangerously-bypass-approvals-and-sandbox -c "model_reasoning_effort=\"$effort\"" \
             -c "check_for_update_on_startup=false" \
