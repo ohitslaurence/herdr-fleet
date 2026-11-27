@@ -15,7 +15,7 @@ opencode): on core fleet couldn't tell them working from idle. Name one to move 
 Stop the watcher first (`fleet server stop`), and set [mux] backend = "core" before starting it
 again: it holds its inbox in memory and follows one backend.
 """
-import json, os, subprocess, sys, time
+import os, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_config, fleet_mux, fleet_state  # noqa: E402
@@ -147,8 +147,7 @@ def repoint(old, new, state_dir=STATE_DIR, worker_dir=None):
         meta = {k: (new if v == old else v) for k, v in meta.items()}
         if str(d) == str(worker_dir):
             meta.update(mux="core", placement="core", workspace="", tab="")
-        with open(os.path.join(d, "meta"), "w") as f:
-            f.writelines(f"{k}={v}\n" for k, v in meta.items())
+        fleet_orch.write_meta(d, meta)
 
 
 def _replace(d, new):
@@ -176,7 +175,7 @@ def move(e, herdr, core, workers):
         try:
             ref = spawn(e["name"])
         except fleet_mux.MuxDown as err:
-            if not e["name"] or "already named" not in str(err) or e["pane"] in workers:
+            if not e["name"] or err.kind != "name_taken" or e["pane"] in workers:
                 raise  # orch drives a worker by name: it can't move without it
             ref = spawn(None)  # names are unique among live terminals; its title still says what it is
     except fleet_mux.MuxDown as err:
@@ -209,16 +208,12 @@ def gather(picked):
     herdr, core = fleet_mux.Herdr(), fleet_mux.Core()
     rows = herdr.agents()
     core.terminals()  # fail now, before planning, if herdr-core isn't up
-    panes = json.loads(subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True, timeout=10).stdout)
-    names = {p["pane_id"]: p.get("label") for p in panes["result"]["panes"]}
-    spaces = json.loads(subprocess.run(["herdr", "workspace", "list"], capture_output=True, text=True, timeout=10).stdout)
-    tasks = {w["workspace_id"]: w.get("label") for w in spaces["result"]["workspaces"]}
-    import fleet_doctor
+    names, tasks = herdr.pane_labels(), herdr.workspace_labels()
     versions = {}
 
     def reports(kind):
         if kind not in versions:
-            versions[kind] = fleet_doctor.reports_status(kind, fleet_doctor.harness_version(kind))
+            versions[kind] = fleet_mux.reports_status(kind, fleet_mux.harness_version(kind))
         return versions[kind]
 
     def argv_of(pane):
@@ -246,7 +241,7 @@ def main(argv):
         return 2
     try:
         herdr, core, workers, entries = gather(picked)
-    except (fleet_mux.MuxDown, OSError, ValueError, KeyError) as err:
+    except fleet_mux.MuxDown as err:
         print(f"fleet migrate: {err}", file=sys.stderr)
         return 3
     if picked:
@@ -268,14 +263,18 @@ def main(argv):
             return 1
     failed = 0
     for e in todo:
-        if fleet_mux.Herdr().get(e["pane"]).get("agent_status") not in MOVABLE:
-            print(f"  {e['pane']}: stays: it started working")
+        try:
+            now = herdr.get(e["pane"]).get("agent_status")
+        except fleet_mux.MuxDown:
+            now = "gone"
+        if now not in MOVABLE:
+            print(f"  {e['pane']}: stays: it's {now} now")
             failed += 1
             continue
         result = move(e, herdr, core, workers)
         failed += result.startswith("stays")
         print(f"  {e['pane']}: {result}")
-    print("next: set [mux] backend = \"core\" and `fleet server restart`, if you haven't")
+    print("next: set [mux] backend = \"core\", then `fleet server start` (stop it first if it's running)")
     return 1 if failed else 0
 
 

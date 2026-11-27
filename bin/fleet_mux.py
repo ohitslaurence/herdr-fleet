@@ -19,7 +19,7 @@ CLI (for bash callers such as orch), JSON out unless noted; help anywhere prints
   fleet mux spawn --cwd D [--name N] [--label k=v]... [--group G] [--kind K] -- <argv>...   (core)
   fleet mux label <ref> k=v... (core) | close <ref>
 """
-import json, os, sys
+import json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_proc  # noqa: E402
@@ -53,7 +53,12 @@ CALLER_ENV = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"
 
 class MuxDown(fleet_proc.HerdrDown):
     """The multiplexer couldn't be asked (not running, not installed, bad answer). Not "no agents".
-    Subclasses HerdrDown so existing `except HerdrDown` callers keep working."""
+    Subclasses HerdrDown so existing `except HerdrDown` callers keep working. kind: hc's error kind
+    (e.g. "name_taken") when it gave one."""
+
+    def __init__(self, message, kind=None):
+        super().__init__(message)
+        self.kind = kind
 
 
 def backend(override=None):
@@ -93,12 +98,13 @@ def _call(prog, args, timeout=10, env=None, ok=(0,)):
     except FileNotFoundError:
         raise MuxDown(f"{prog} isn't on PATH") from None
     if p.returncode not in ok:
-        first = (p.stderr.strip().splitlines() or [f"`{prog} {' '.join(args)}` exited {p.returncode}"])[0]
+        first, kind = (p.stderr.strip().splitlines() or [f"`{prog} {' '.join(args)}` exited {p.returncode}"])[0], None
         try:  # hc --json reports errors as {"error": {"message", "hint", "kind"}}
-            first = json.loads(first)["error"]["message"]
+            err = json.loads(first)["error"]
+            first, kind = err["message"], err.get("kind")
         except (ValueError, KeyError, TypeError):
             pass
-        raise MuxDown(first[:200])
+        raise MuxDown(first[:200], kind)
     return p.stdout
 
 
@@ -144,6 +150,15 @@ class Herdr:
     def rename_group(self, group, name):
         _call("herdr", ["workspace", "rename", group, name])
 
+    def pane_labels(self):
+        """{pane id: its label} for every herdr pane."""
+        return {p["pane_id"]: p.get("label") for p in _json("herdr", ["pane", "list"]).get("result", {}).get("panes", [])}
+
+    def workspace_labels(self):
+        """{workspace id: its label}."""
+        return {w["workspace_id"]: w.get("label")
+                for w in _json("herdr", ["workspace", "list"]).get("result", {}).get("workspaces", [])}
+
     def argv(self, ref):
         """The command line of the program in the pane's foreground (`fleet migrate` restarts it)."""
         info = _json("herdr", ["pane", "process-info", "--pane", ref]).get("result", {}).get("process_info", {})
@@ -161,6 +176,32 @@ class Herdr:
 
 
 # ---- herdr-core ------------------------------------------------------------------------------
+
+# OSC 7501 status reports: herdr-core shows an agent's status only when the agent sends them
+STATUS_SINCE = {"claude": "2.1.295", "codex": "0.162.2"}  # codex: merged after the 0.162.1 release
+
+
+def _vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+
+def reports_status(kind, version):
+    """Whether this harness version tells herdr-core its status (else its sessions show unknown)."""
+    since = STATUS_SINCE.get(kind)
+    return bool(since and version and _vtuple(version) >= _vtuple(since))
+
+
+def harness_version(kind):
+    """The installed version of a configured harness, or None if it isn't installed or won't say."""
+    import fleet_config
+    cmd = fleet_config.agent_kinds()[kind]["cmd"][0]
+    try:
+        p = fleet_proc.run([cmd, "--version"], timeout=10)
+    except (OSError, fleet_proc.subprocess.SubprocessError):
+        return None
+    m = re.search(r"(\d+\.\d+\.\d+)", (p.stdout or "") + (p.stderr or ""))
+    return m.group(1) if p.returncode == 0 and m else None
+
 
 _HELP = {}
 

@@ -172,6 +172,14 @@ class FakeBins(unittest.TestCase):
                                         ["agent", "read", "fix", "--source", "recent-unwrapped", "--lines", "80"],
                                         ["agent", "get", "fix"]])
 
+    def test_hc_error_kind_is_kept(self):
+        err = {"error": {"kind": "name_taken", "message": 'a live terminal is already named "fix"', "hint": "x"}}
+        self.fake("hc", f"sys.stderr.write(json.dumps({err!r}) + '\\n'); sys.exit(1)")
+        with mock.patch.dict(os.environ, {"PATH": f"{self.dir}:{SYSTEM_PATH}"}):
+            with self.assertRaises(fleet_mux.MuxDown) as cm:
+                fleet_mux.Core().spawn(["claude"], "/w", name="fix")
+        self.assertEqual((cm.exception.kind, str(cm.exception)), ("name_taken", 'a live terminal is already named "fix"'))
+
     def test_down_is_an_error_not_empty(self):
         self.fake("hc", "sys.stderr.write('core is not running\\n'); sys.exit(1)")
         p = self.run_mux("core", "agents")

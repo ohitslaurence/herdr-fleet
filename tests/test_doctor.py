@@ -142,7 +142,7 @@ class Judges(unittest.TestCase):
         self.assertEqual(D.judge_core("0.1.22", "0.1.22", "no core", {})[0]["status"], "fail")
         leak = D.judge_core("0.1.22", "0.1.22", 0, {}, ["CLAUDE_CODE_CHILD_SESSION"])[-1]
         self.assertEqual((leak["id"], leak["status"]), ("core.env", "warn"))
-        self.assertIn("CLAUDE_CODE_CHILD_SESSION", leak["detail"] if "detail" in leak else json.dumps(leak))
+        self.assertIn("CLAUDE_CODE_CHILD_SESSION", leak["summary"])
 
     def test_watcher(self):
         now = 1_800_000_000

@@ -116,24 +116,6 @@ def check_herdr():
                        fleet_version.TESTED_HERDR_MAX, panes)
 
 
-# OSC 7501 status reports: herdr-core shows an agent's status only when the agent sends them
-STATUS_SINCE = {"claude": "2.1.295", "codex": "0.162.2"}  # codex: merged after the 0.162.1 release
-
-
-def reports_status(kind, version):
-    """Whether this harness version tells herdr-core its status (else its sessions show unknown)."""
-    since = STATUS_SINCE.get(kind)
-    return bool(since and version and vtuple(version) >= vtuple(since))
-
-
-def harness_version(kind):
-    """The installed version of a configured harness, or None if it isn't installed or won't say."""
-    cmd = fleet_config.agent_kinds()[kind]["cmd"][0]
-    vrc, vout = sh(cmd, "--version") if shutil.which(cmd) else (127, "")
-    m = re.search(r"(\d+\.\d+\.\d+)", vout or "")
-    return m.group(1) if vrc == 0 and m else None
-
-
 def holder_leaks():
     """Agent-session and herdr variables in the environment herdr-core gives new terminals (its
     current holder's), by name. Linux only (reads /proc); [] when it can't tell."""
@@ -156,6 +138,7 @@ def judge_core(have, tested, agents_or_error, kinds, leaks=()):
     """have/tested: hc versions; agents_or_error: agent count, or why hc didn't answer;
     kinds: {kind: installed version or None} for the configured harnesses; leaks: agent variables
     in what new terminals inherit."""
+    import fleet_mux
     res = []
     if isinstance(agents_or_error, str):
         res.append(r("core", "fail", f"herdr-core {have} isn't answering: {agents_or_error}", "hc server start"))
@@ -165,10 +148,10 @@ def judge_core(have, tested, agents_or_error, kinds, leaks=()):
     else:
         res.append(r("core", "ok", f"herdr-core {have}, {agents_or_error} agent terminal(s)"))
     for kind, version in kinds.items():
-        since = STATUS_SINCE.get(kind)
+        since = fleet_mux.STATUS_SINCE.get(kind)
         if version is None:
             continue
-        if not reports_status(kind, version):
+        if not fleet_mux.reports_status(kind, version):
             res.append(r(f"core.status.{kind}", "warn",
                          f"{kind} {version} doesn't report its status to herdr-core (needs {since or 'support'}+): "
                          "its sessions show 'unknown', and fleet can't tell working from idle",
@@ -198,7 +181,7 @@ def check_core():
         agents = len(fleet_mux.agents())
     except fleet_mux.MuxDown as e:
         agents = str(e)
-    kinds = {kind: harness_version(kind) for kind in used_kinds()}
+    kinds = {kind: fleet_mux.harness_version(kind) for kind in used_kinds()}
     return judge_core(out.split()[-1] if out else "0", fleet_version.TESTED_CORE_MAX, agents, kinds, holder_leaks())
 
 

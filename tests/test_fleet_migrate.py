@@ -139,11 +139,12 @@ class Move(unittest.TestCase):
         self.repoint.assert_not_called()
 
     def test_a_taken_name_falls_back_to_none_except_for_an_orch_worker(self):
-        self.core.spawn.side_effect = [fleet_mux.MuxDown('a live terminal is already named "fix"'), "t8"]
+        taken = fleet_mux.MuxDown('a live terminal is already named "fix"', kind="name_taken")
+        self.core.spawn.side_effect = [taken, "t8"]
         with mock.patch.object(M, "up", return_value=True):
             self.assertEqual(M.move(self.entry(), self.herdr, self.core, {}), "moved to t8")
         self.assertIsNone(self.core.spawn.call_args.kwargs["name"])
-        self.core.spawn.side_effect = fleet_mux.MuxDown('a live terminal is already named "fix"')
+        self.core.spawn.side_effect = taken
         result = M.move(self.entry(), self.herdr, self.core, {"p1": ("/o/fix", {"name": "fix"})})
         self.assertTrue(result.startswith("stays"), result)
 

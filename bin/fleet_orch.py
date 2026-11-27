@@ -166,6 +166,15 @@ def _read(path):
         return ""
 
 
+def write_meta(directory, meta):
+    """Replace a worker's meta (orch writes it at start; key=value lines, read with sed) atomically."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="meta.", suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        f.writelines(f"{k}={v}\n" for k, v in meta.items())
+    os.replace(tmp, os.path.join(directory, "meta"))
+
+
 def workers(home):
     """(state dir, meta dict, last status line) for every worker under home."""
     for path in sorted(Path(home).glob("*/meta")):
