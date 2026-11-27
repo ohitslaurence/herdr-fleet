@@ -177,18 +177,11 @@ def workers(home):
 def worker_status(name, meta):
     """The multiplexer's word for a worker, on the backend it was started on; "-" if it can't say."""
     import fleet_mux
-    old = os.environ.get("FLEET_MUX")
     try:
-        if meta.get("mux"):
-            os.environ["FLEET_MUX"] = meta["mux"]
-        return fleet_mux.mux().get(name)["status"]
-    except (fleet_mux.MuxDown, KeyError, TypeError):
-        return "-"
-    finally:
-        if old is None:
-            os.environ.pop("FLEET_MUX", None)
-        else:
-            os.environ["FLEET_MUX"] = old
+        row = fleet_mux.get(name, meta.get("mux") or None)
+    except fleet_mux.MuxDown:  # a meta naming no known backend
+        row = None
+    return (row or {}).get("agent_status") or "-"
 
 
 def status(home):
