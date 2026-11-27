@@ -171,7 +171,7 @@ PY
   case "$kind" in
     codex)
       # check_for_update_on_startup: an update prompt blocks an unattended worker at launch
-      args+=(--dangerously-bypass-approvals-and-sandbox -c "model_reasoning_effort=\"$effort\"" \
+      args=(--dangerously-bypass-approvals-and-sandbox -c "model_reasoning_effort=\"$effort\"" \
             -c "check_for_update_on_startup=false" \
             -c "notify=[\"bash\",\"-c\",\"touch $dir/turn-ended\"]")
       [[ -n "$model" ]] && args+=(--model "$model") ;;
