@@ -23,6 +23,7 @@
   fleet skills refresh              re-copy the installed skills from this install (after a pull)
   fleet update [--check] [--json]   move to the newest release, after showing what changes
   fleet uninstall                   remove what install.sh added (config, keys, state stay)
+  fleet mux backend|agents|get|status|read|send|keys|spawn|label|close   the multiplexer seam ([mux] backend)
   fleet remote serve|scopes|audit|status|logs   read-only fleet access for an agent on your tailnet
   fleet remote install|uninstall|start|stop|restart   the same, as a user service (docs/remote.md)
   fleet learn [--repo owner/name] [--days N] [--json]   what craft reviews found and what agents did
@@ -120,6 +121,10 @@ def main(argv):
         sys.path.insert(0, here)
         import fleet_install
         sys.exit(fleet_install.main(argv))
+    if argv[:1] == ["mux"]:
+        sys.path.insert(0, here)
+        import fleet_mux
+        sys.exit(fleet_mux.main(argv[1:]))
     if argv[:1] == ["remote"]:
         sys.path.insert(0, here)
         import fleet_remote
