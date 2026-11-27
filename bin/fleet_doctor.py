@@ -96,7 +96,7 @@ def judge_herdr(have, need, tested, agents_or_error):
 def on_core():
     import fleet_mux
     try:
-        return fleet_mux.backend() == "core"
+        return fleet_mux.is_core()
     except fleet_mux.MuxDown:
         return False
 
@@ -109,7 +109,7 @@ def check_herdr():
         return r("herdr", "fail", "herdr isn't installed", "install herdr: https://herdr.dev")
     import fleet_proc
     try:
-        panes = len(fleet_proc.herdr_agents_raw())
+        panes = len(fleet_proc.herdr_agents())
     except fleet_proc.HerdrDown as e:
         panes = str(e)
     return judge_herdr(out.split()[-1] if out else "0", fleet_version.manifest().get("min_herdr_version", "0"),
@@ -156,7 +156,7 @@ def check_core():
         return [r("core", "skip", f"herdr-core {out.split()[-1] if out else '?'} installed; [mux] backend is herdr")]
     import fleet_mux
     try:
-        agents = len(fleet_mux.herdr_rows())
+        agents = len(fleet_mux.agents())
     except fleet_mux.MuxDown as e:
         agents = str(e)
     kinds = {}

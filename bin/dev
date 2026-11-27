@@ -54,7 +54,7 @@ Context = dict  # one entry of `herdr workspace list` that has a linked worktree
 # dev and fleet new label every terminal they start there (docs/herdr-core.md).
 
 def on_core() -> bool:
-    return fleet_mux.backend() == "core"
+    return fleet_mux.is_core()
 
 
 def require_mux():
@@ -63,7 +63,7 @@ def require_mux():
 
 def core_terminals() -> list[dict]:
     try:
-        return fleet_mux.Core()._list()
+        return fleet_mux.Core().terminals()
     except fleet_mux.MuxDown as e:
         die(f"herdr-core: {e}")
 
@@ -72,16 +72,16 @@ def core_contexts() -> list[Context]:
     by: dict[str, Context] = {}
     for t in core_terminals():
         labels = t.get("labels") or {}
-        wt = labels.get("fleet.worktree")
+        wt = labels.get(fleet_mux.WORKTREE)
         if not wt:
             continue  # finished terminals stay: dev done and prune remove them with the context
-        ctx = by.setdefault(wt, {"workspace_id": labels.get("fleet.group") or os.path.basename(wt),
-                                 "label": labels.get("fleet.task") or os.path.basename(wt),
-                                 "worktree": {"checkout_path": wt, "repo_root": labels.get("fleet.repo_root", ""),
+        ctx = by.setdefault(wt, {"workspace_id": labels.get(fleet_mux.GROUP) or os.path.basename(wt),
+                                 "label": labels.get(fleet_mux.TASK) or os.path.basename(wt),
+                                 "worktree": {"checkout_path": wt, "repo_root": labels.get(fleet_mux.REPO_ROOT, ""),
                                               "is_linked_worktree": True},
                                  "terminals": []})
         ctx["terminals"].append(t)
-        if fleet_mux._is_agent(fleet_mux._core_row(t)):  # the workspace's agent_status, as herdr rolls it up
+        if fleet_mux.is_agent(t):  # the workspace's agent_status, as herdr rolls it up
             st = fleet_mux.core_status(t)
             if URGENCY.index(st) < URGENCY.index(ctx.get("agent_status") or "unknown"):
                 ctx["agent_status"] = st
@@ -89,11 +89,6 @@ def core_contexts() -> list[Context]:
 
 
 URGENCY = ("blocked", "working", "done", "idle", "unknown")
-
-
-def core_labels(repo: Repo, worktree_path: str, task: str) -> dict[str, str]:
-    """What every terminal of this context carries; fleet_mux adds fleet.group from the group."""
-    return {"fleet.worktree": worktree_path, "fleet.task": task, "fleet.repo_root": repo.path}
 
 
 def core_open(repo: Repo, worktree_path: str, task: str, extra: list[tuple[str, str]] | None = None) -> str:
@@ -106,7 +101,8 @@ def core_open(repo: Repo, worktree_path: str, task: str, extra: list[tuple[str, 
         if cwd in have:
             continue
         try:
-            fleet_mux.Core().spawn([shell], cwd, labels=core_labels(repo, worktree_path, task), group=group)
+            fleet_mux.Core().spawn([shell], cwd, labels=fleet_mux.context_labels(worktree_path, task, repo.path),
+                                   group=group)
         except fleet_mux.MuxDown as e:
             die(f"herdr-core couldn't open a terminal in {cwd}: {e}")
     print(worktree_path)
@@ -484,9 +480,7 @@ def ensure_tabs(workspace_id: str, default_cwd: str, extra_tabs: list[tuple[str,
 
 
 def list_agents() -> list[dict]:
-    if on_core():
-        return fleet_mux.herdr_rows()
-    return herdr_json(["agent", "list"])["result"]["agents"]
+    return fleet_mux.agents()
 
 
 def list_agent_cwds() -> list[str]:

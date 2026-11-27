@@ -79,9 +79,10 @@ class FakeBins(unittest.TestCase):
         p = self.run_mux("core", "agents")
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = json.loads(p.stdout)
-        self.assertEqual([r["ref"] for r in rows], ["t2", "t3"])
-        self.assertEqual(rows[1]["kind"], "codex")
-        self.assertEqual(rows[0]["cwd"], "/w/sub")
+        self.assertEqual([r["pane_id"] for r in rows], ["t2", "t3"])  # herdr's row shape on core too
+        self.assertEqual(rows[1]["agent"], "codex")
+        self.assertEqual(rows[0]["foreground_cwd"], "/w/sub")
+        self.assertEqual(rows[0]["agent_status"], "working")
         self.assertEqual(len(self.calls()), 1)
 
     def test_core_spawn_labels_group_and_kind(self):
@@ -110,6 +111,30 @@ class FakeBins(unittest.TestCase):
         self.run_mux("core", "read", "t2", "--visible")
         self.run_mux("core", "read", "t2", "--lines", "80")
         self.assertEqual(self.calls(), [["read", "t2"], ["read", "t2", "--lines", "80"]])
+
+    def test_core_spawn_adds_no_daemon_for_codex(self):
+        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.run_mux("core", "spawn", "--cwd", "/w", "--kind", "codex", "--", "codex", "--yolo")
+        argv = self.calls()[0]
+        self.assertEqual(argv[argv.index("--") + 1:], ["codex", "--no-daemon", "--yolo"])
+
+    def test_cli_help_anywhere_does_nothing_else(self):
+        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        p = self.run_mux("core", "spawn", "--cwd", "/w", "--", "claude", "--help")
+        self.assertIn("fleet mux backend", p.stdout)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_cli_bad_spawn_flags_say_so(self):
+        p = self.run_mux("core", "spawn", "--cwd", "/w", "--label", "--", "x")
+        self.assertIn("needs a value", p.stderr)
+        p = self.run_mux("core", "spawn", "--label", "novalue", "--", "x")
+        self.assertIn("key=value", p.stderr)
+
+    def test_core_close_tolerates_an_already_finished_program(self):
+        self.fake("hc", "sys.exit(11 if sys.argv[1] == 'kill' else 0)")
+        p = self.run_mux("core", "close", "t9")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.calls(), [["kill", "t9"], ["rm", "t9"]])
 
     def test_herdr_verbs_keep_todays_commands(self):
         self.fake("herdr", "print(json.dumps({'result': {'agent': {'pane_id': 'w1:p2', 'agent_status': 'idle'}}}))")

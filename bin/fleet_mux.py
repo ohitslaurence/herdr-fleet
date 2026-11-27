@@ -5,17 +5,19 @@ Two backends behind the same verbs:
   core   herdr-core (`hc`), which the Herdr app is a client of: named terminals with labels; status is
          only what the program reports itself over OSC 7501 (Claude Code does; see docs/herdr-core.md).
 
-Pick with [mux] backend in the fleet config, or FLEET_MUX=herdr|core (the env wins). Inside a
-terminal the backend that runs it is a better guess than the config, so here() checks both.
+Pick with [mux] backend in the fleet config, or FLEET_MUX=herdr|core (the env wins); code that
+knows which backend a thing lives on passes it: mux("core").
 
 Every verb takes a ref: a herdr pane id or agent name, or an hc address (t7, box/t7) or name.
-Status words are normalised to herdr's: idle, working, blocked, done, unknown.
+Agent rows are herdr's `agent list` rows on both backends (pane_id, agent, agent_status, cwd,
+foreground_cwd, workspace_id, label, ...); on core pane_id is the hc address and workspace_id the
+fleet group. Status words are herdr's: idle, working, blocked, done, unknown.
 
-CLI (for bash callers such as orch), JSON out unless noted:
-  fleet_mux.py backend | here | agents | get <ref> | status <ref> (bare word)
-  fleet_mux.py read <ref> [--lines N] [--visible] (text) | send <ref> <text> | keys <ref> <key>...
-  fleet_mux.py spawn --cwd D [--name N] [--label k=v]... [--group G] [--kind K] -- <argv>...
-  fleet_mux.py label <ref> k=v... | close <ref>
+CLI (for bash callers such as orch), JSON out unless noted; help anywhere prints this:
+  fleet mux backend | here | agents | get <ref> | status <ref> (bare word)
+  fleet mux read <ref> [--lines N] [--visible] (text) | send <ref> <text> | keys <ref> <key>...
+  fleet mux spawn --cwd D [--name N] [--label k=v]... [--group G] [--kind K] -- <argv>...   (core)
+  fleet mux label <ref> k=v... (core) | close <ref> (core)
 """
 import json, os, sys
 
@@ -24,7 +26,20 @@ import fleet_proc  # noqa: E402
 
 BACKENDS = ("herdr", "core")
 STATUSES = ("idle", "working", "blocked", "done", "unknown")
-LABEL = "fleet."  # prefix of every label fleet writes on a core terminal
+
+# Labels fleet writes on a core terminal (docs/herdr-core.md). Read and write them by these names.
+GROUP = "fleet.group"            # the worktree (or other unit) it belongs to: its workspace_id
+KIND = "fleet.kind"              # the agent harness
+BY = "fleet.by"                  # an orch worker's orchestrator terminal
+WORKTREE = "fleet.worktree"      # a dev context's checkout
+TASK = "fleet.task"              # a dev context's task name
+REPO_ROOT = "fleet.repo_root"    # a dev context's repo
+
+AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
+
+# herdr's variables, dropped from a terminal fleet starts on core: an agent there that saw the
+# orchestrator's HERDR_PANE_ID would report and act as that pane.
+HERDR_ENV = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH")
 
 
 class MuxDown(fleet_proc.HerdrDown):
@@ -32,8 +47,8 @@ class MuxDown(fleet_proc.HerdrDown):
     Subclasses HerdrDown so existing `except HerdrDown` callers keep working."""
 
 
-def backend():
-    b = os.environ.get("FLEET_MUX")
+def backend(override=None):
+    b = override or os.environ.get("FLEET_MUX")
     if not b:
         try:
             import fleet_config
@@ -45,6 +60,12 @@ def backend():
     return b
 
 
+def is_core(override=None):
+    """For the few callers whose structure differs by backend (dev's contexts, fleet new's launch):
+    herdr has workspaces and tabs, core has only labelled terminals."""
+    return backend(override) == "core"
+
+
 def here(env=None):
     """This process's own terminal ref, or None outside one. An hc terminal started from a herdr
     pane would inherit its HERDR_PANE_ID, so HC_TERMINAL_ID (the innermost) wins on any backend."""
@@ -52,17 +73,17 @@ def here(env=None):
     return env.get("HC_TERMINAL_ID") or env.get("HERDR_PANE_ID") or None
 
 
-# herdr's variables, dropped from a terminal fleet starts on core: an agent there that saw the
-# orchestrator's HERDR_PANE_ID would report and act as that pane.
-HERDR_ENV = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH")
+def context_labels(worktree, task, repo_root):
+    """What every terminal of a dev context carries on core (dev and fleet new both write them)."""
+    return {WORKTREE: worktree, TASK: task, REPO_ROOT: repo_root}
 
 
-def _call(prog, args, timeout=10, env=None):
+def _call(prog, args, timeout=10, env=None, ok=(0,)):
     try:
         p = fleet_proc.run([prog, *args], timeout=timeout, **({"env": env} if env is not None else {}))
     except FileNotFoundError:
         raise MuxDown(f"{prog} isn't on PATH") from None
-    if p.returncode:
+    if p.returncode not in ok:
         raise MuxDown((p.stderr.strip().splitlines() or [f"`{prog} {' '.join(args)}` exited {p.returncode}"])[0][:200])
     return p.stdout
 
@@ -77,24 +98,15 @@ def _json(prog, args, timeout=10, env=None):
 
 # ---- herdr -----------------------------------------------------------------------------------
 
-def _herdr_row(a):
-    return {"ref": a.get("pane_id"), "name": a.get("name") or a.get("label"), "kind": a.get("agent"),
-            "status": a.get("agent_status") if a.get("agent_status") in STATUSES else "unknown",
-            "cwd": a.get("foreground_cwd") or a.get("cwd"), "group": a.get("workspace_id"),
-            "title": a.get("terminal_title_stripped") or "", "session": (a.get("agent_session") or {}).get("value"),
-            "tab": a.get("tab_id"), "labels": {}}
-
-
 class Herdr:
+    name = "herdr"
+
     def agents(self):
-        r = _json("herdr", ["agent", "list"]).get("result")
-        rows = r["agents"] if isinstance(r, dict) else r
-        if not isinstance(rows, list):
-            raise MuxDown("unexpected answer from `herdr agent list`")
-        return [_herdr_row(a) for a in rows]
+        return fleet_proc.herdr_agents()
 
     def get(self, ref):
-        return _herdr_row(_json("herdr", ["agent", "get", ref])["result"]["agent"])
+        r = _json("herdr", ["agent", "get", ref]).get("result", {})
+        return r.get("agent", r)
 
     def read(self, ref, lines=None, visible=False):
         args = ["agent", "read", ref, "--source", "visible" if visible else "recent-unwrapped"]
@@ -108,37 +120,20 @@ class Herdr:
     def keys(self, ref, *keys):
         _call("herdr", ["agent", "send-keys", ref, *keys])
 
-    def spawn(self, argv, cwd, name=None, labels=None, group=None, kind=None):
-        """A new tab in workspace `group` (default: this pane's), running argv. With kind, herdr
-        starts it as a recognised agent so its status is tracked."""
-        ws = group or os.environ.get("HERDR_WORKSPACE_ID")
-        if not ws:
-            raise MuxDown("herdr spawn needs a workspace (run inside a herdr pane, or pass a group)")
-        created = _json("herdr", ["tab", "create", "--workspace", ws, "--cwd", cwd, "--label", name or "agent",
-                                  "--no-focus"])["result"]
-        pane = created["root_pane"]["pane_id"]
-        if kind:
-            fleet_proc.run(["herdr", "agent", "start", name or pane, "--kind", kind, "--pane", pane,
-                            "--timeout", "90000", "--", *argv[1:]], timeout=120)
-        else:
-            _call("herdr", ["pane", "run", pane, " ".join(_sh(a) for a in argv)])
-        return pane
+    def focus(self, ref):
+        _call("herdr", ["agent", "focus", ref])
+        return True
 
-    def label(self, ref, **kv):
-        return False  # herdr panes carry no free-form labels; callers keep their own state
+    def rename(self, ref, name):
+        _call("herdr", ["pane", "rename", ref, name])
 
-    def close(self, ref):
-        try:
-            tab = self.get(ref)["tab"]
-        except (MuxDown, KeyError, TypeError):
-            return
-        if tab:
-            fleet_proc.run(["herdr", "tab", "close", tab], timeout=10)
+    def rename_group(self, group, name):
+        _call("herdr", ["workspace", "rename", group, name])
 
+    def spawn(self, *a, **k):
+        raise MuxDown("herdr: agents start in tabs (orch, dev, fleet new), not through the seam")
 
-def _sh(a):
-    import shlex
-    return shlex.quote(a)
+    label = close = spawn
 
 
 # ---- herdr-core ------------------------------------------------------------------------------
@@ -162,35 +157,37 @@ def core_status(t):
     return "unknown"
 
 
-def _core_row(t):
+def is_agent(t):
+    """A live hc terminal running an agent: a known agent program, or one fleet labelled with a
+    kind. A finished one stays listed until removed, but its agent is gone (herdr drops the pane)."""
+    labels = t.get("labels") or {}
+    prog = (t.get("foreground") or {}).get("name") or t.get("agent")
+    return t.get("state") != "finished" and (KIND in labels or prog in AGENT_PROGRAMS or t.get("agent") in AGENT_PROGRAMS)
+
+
+def herdr_shape(t):
+    """An hc terminal as a `herdr agent list` row. The workspace is the fleet group, else the
+    checkout it runs in, so one worktree's terminals still group together."""
     labels = t.get("labels") or {}
     fg = t.get("foreground") or {}
-    return {"ref": t.get("address"), "name": t.get("name"), "kind": labels.get(LABEL + "kind") or t.get("agent")
-            or fg.get("name"), "status": core_status(t), "cwd": fg.get("cwd") or t.get("cwd"),
-            "group": labels.get(LABEL + "group"), "title": t.get("title") or "",
-            "session": labels.get(LABEL + "session"), "labels": labels,
-            "msg": (t.get("status") or {}).get("msg"), "state": t.get("state")}
-
-
-AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
+    cwd = fg.get("cwd") or t.get("cwd")
+    return {"pane_id": t.get("address"), "agent": labels.get(KIND) or t.get("agent") or fg.get("name"),
+            "agent_status": core_status(t), "cwd": t.get("cwd"), "foreground_cwd": cwd,
+            "workspace_id": labels.get(GROUP) or cwd, "tab_id": t.get("address"), "label": t.get("name"),
+            "terminal_title": t.get("title") or "", "terminal_title_stripped": t.get("title") or "",
+            "agent_session": None, "labels": labels, "status_msg": (t.get("status") or {}).get("msg"),
+            "pid": t.get("pid"), "state": t.get("state")}
 
 
 class Core:
-    def agents(self):
-        """Terminals running an agent: a known agent program, or one fleet labelled with a kind."""
-        return [r for r in (_core_row(t) for t in self._list()) if _is_agent(r)]
+    name = "core"
 
-    def _list(self):
-        """Every terminal with its labels and status. `hc ls` is a summary without them; the first
-        line `hc events` prints is a full snapshot, so one call instead of a `get` per terminal."""
-        import select, subprocess
+    def terminals(self):
+        """Every hc terminal as hc describes it, labels and status included. `hc ls` is a summary
+        without them; the first line `hc events` prints is a full snapshot: one call, not a `get`
+        per terminal."""
         try:
-            with subprocess.Popen(["hc", "events", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  text=True) as p:
-                ready, _, _ = select.select([p.stdout], [], [], 10)  # a local socket: slower is down
-                first = p.stdout.readline() if ready else ""
-                p.kill()
-                err = "" if first else p.stderr.read()
+            first, err = fleet_proc.first_line(["hc", "events", "--json"], timeout=10)
         except FileNotFoundError:
             raise MuxDown("hc isn't on PATH") from None
         try:
@@ -200,8 +197,11 @@ class Core:
             raise MuxDown(lines[0][:200] if lines else f"unexpected answer from `hc events`: {first.strip()[:80]!r}") from None
         return [t for t in rows if isinstance(t, dict)]
 
+    def agents(self):
+        return [herdr_shape(t) for t in self.terminals() if is_agent(t)]
+
     def get(self, ref):
-        return _core_row(_json("hc", ["get", ref, "--json"]))
+        return herdr_shape(_json("hc", ["get", ref, "--json"]))
 
     def read(self, ref, lines=None, visible=False):
         """visible: the screen only; else the screen plus `lines` of history above it."""
@@ -216,15 +216,24 @@ class Core:
     def keys(self, ref, *keys):
         _call("hc", ["keys", ref, *keys])
 
+    def focus(self, ref):
+        return False  # core has no window: the Herdr app (or `hc attach`) shows a terminal
+
+    def rename(self, ref, name):
+        self.label(ref, **{TASK: name})
+
+    def rename_group(self, group, name):
+        pass  # a group is its terminals' labels; rename() already relabelled the one that matters
+
     def spawn(self, argv, cwd, name=None, labels=None, group=None, kind=None):
         argv = list(argv)
         if kind == "codex" and "--no-daemon" not in argv:
             argv.insert(1, "--no-daemon")  # else Codex's daemon runs its commands outside the terminal
         labels = dict(labels or {})
         if group:
-            labels[LABEL + "group"] = group
+            labels[GROUP] = group
         if kind:
-            labels[LABEL + "kind"] = kind
+            labels[KIND] = kind
         args = ["run", "--bg", "--json", "--cwd", cwd]
         if name:
             args += ["--name", name]
@@ -235,74 +244,75 @@ class Core:
 
     def label(self, ref, **kv):
         _call("hc", ["label", ref, *(f"{k}={v}" for k, v in kv.items())])
-        return True
 
     def close(self, ref):
-        fleet_proc.run(["hc", "kill", ref], timeout=10)
-        fleet_proc.run(["hc", "rm", ref], timeout=10)
+        """End the program and remove the terminal. Killing one already finished is fine (hc exit 11)."""
+        _call("hc", ["kill", ref], ok=(0, 11))
+        _call("hc", ["rm", ref])
 
 
-def herdr_shape(t):
-    """An hc terminal as a `herdr agent list` row, for the callers that read those fields (the
-    cockpit, the watcher, doctor). pane_id is the hc address; the workspace is the fleet group,
-    else the checkout the terminal runs in, so one worktree's terminals still group together."""
-    r = _core_row(t)
-    return {"pane_id": r["ref"], "agent": r["kind"], "agent_status": r["status"], "cwd": t.get("cwd"),
-            "foreground_cwd": r["cwd"], "workspace_id": r["group"] or r["cwd"], "tab_id": r["ref"],
-            "label": r["name"], "terminal_title": r["title"], "terminal_title_stripped": r["title"],
-            "agent_session": {"value": r["session"]} if r["session"] else None, "labels": r["labels"],
-            "status_msg": r.get("msg")}
+def mux(name=None):
+    """The backend `name` names, else the configured one."""
+    return Core() if is_core(name) else Herdr()
 
 
-def herdr_rows():
-    """Agent rows in herdr's shape on either backend. Raises MuxDown when it can't answer."""
-    if backend() == "core":
-        c = Core()
-        return [herdr_shape(t) for t in c._list() if _is_agent(_core_row(t))]
-    return fleet_proc.herdr_agents_raw()
+def agents():
+    """Agent rows (herdr's shape) on the configured backend; MuxDown when it can't answer."""
+    return mux().agents()
 
 
-def agent_row(ref):
-    """One agent in herdr's shape, or None if the multiplexer doesn't know it."""
+def get(ref, name=None):
+    """One agent row, or None if the multiplexer doesn't know it (or can't be asked)."""
     try:
-        if backend() == "core":
-            return herdr_shape(_json("hc", ["get", ref, "--json"]))
-        r = _json("herdr", ["agent", "get", ref]).get("result", {})
-        return r.get("agent", r)
+        return mux(name).get(ref)
     except MuxDown:
         return None
 
 
-def _is_agent(r):
-    """A live terminal running an agent. A finished one stays listed in hc until removed, but
-    its agent is gone (herdr drops the pane): not an agent."""
-    return r.get("state") != "finished" and (r["kind"] in AGENT_PROGRAMS or (LABEL + "kind") in r["labels"])
-
-
-def mux():
-    return Core() if backend() == "core" else Herdr()
-
-
-def agents():
-    return mux().agents()
-
-
-def status(ref):
-    try:
-        return mux().get(ref)["status"]
-    except MuxDown:
-        return "unknown"
+def status(ref, name=None):
+    return (get(ref, name) or {}).get("agent_status") or "unknown"
 
 
 # ---- CLI -------------------------------------------------------------------------------------
 
+USAGE = __doc__.strip()
+
+
+def _need(rest, n, what):
+    if len(rest) < n:
+        raise SystemExit(f"fleet mux: {what}")
+    return rest
+
+
+def _spawn_args(rest):
+    if "--" not in rest:
+        raise SystemExit("fleet mux spawn: put the command after --")
+    opts, argv = rest[:rest.index("--")], rest[rest.index("--") + 1:]
+    if not argv:
+        raise SystemExit("fleet mux spawn: no command after --")
+    o = {"labels": {}}
+    if len(opts) % 2:
+        raise SystemExit(f"fleet mux spawn: {opts[-1]} needs a value")
+    for f, v in zip(opts[::2], opts[1::2]):
+        if f == "--label":
+            k, eq, val = v.partition("=")
+            if not eq or not k:
+                raise SystemExit(f"fleet mux spawn: --label takes key=value, not {v!r}")
+            o["labels"][k] = val
+        elif f in ("--cwd", "--name", "--group", "--kind"):
+            o[f[2:]] = v
+        else:
+            raise SystemExit(f"fleet mux spawn: unknown flag {f}")
+    return argv, o
+
+
 def main(argv):
-    if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__.strip())
+    if not argv or any(a in ("-h", "--help", "help") for a in argv):
+        print(USAGE)
         return 0
     cmd, rest = argv[0], argv[1:]
-    m = mux()
     try:
+        m = mux()
         if cmd == "backend":
             print(backend())
         elif cmd == "here":
@@ -310,42 +320,29 @@ def main(argv):
         elif cmd == "agents":
             print(json.dumps(m.agents()))
         elif cmd == "get":
-            print(json.dumps(m.get(rest[0])))
+            print(json.dumps(m.get(_need(rest, 1, "get <ref>")[0])))
         elif cmd == "status":
-            print(status(rest[0]))
+            print(status(_need(rest, 1, "status <ref>")[0]))
         elif cmd == "read":
+            _need(rest, 1, "read <ref> [--lines N] [--visible]")
             lines = int(rest[rest.index("--lines") + 1]) if "--lines" in rest else None
             sys.stdout.write(m.read(rest[0], lines=lines, visible="--visible" in rest))
         elif cmd == "send":
-            m.send(rest[0], rest[1])
+            m.send(*_need(rest, 2, "send <ref> <text>")[:2])
         elif cmd == "keys":
-            m.keys(rest[0], *rest[1:])
+            m.keys(*_need(rest, 2, "keys <ref> <key>..."))
         elif cmd == "spawn":
-            if "--" not in rest:
-                raise SystemExit("fleet_mux spawn: put the command after --")
-            opts, argv_ = rest[:rest.index("--")], rest[rest.index("--") + 1:]
-            o = {"labels": {}}
-            i = 0
-            while i < len(opts):
-                f, v = opts[i], opts[i + 1] if i + 1 < len(opts) else None
-                if f == "--label":
-                    k, _, val = v.partition("=")
-                    o["labels"][k] = val
-                elif f in ("--cwd", "--name", "--group", "--kind"):
-                    o[f[2:]] = v
-                else:
-                    raise SystemExit(f"fleet_mux spawn: unknown flag {f}")
-                i += 2
+            argv_, o = _spawn_args(rest)
             print(m.spawn(argv_, o.pop("cwd", os.getcwd()), **o))
         elif cmd == "label":
-            kv = dict(a.partition("=")[::2] for a in rest[1:])
-            m.label(rest[0], **kv)
+            _need(rest, 2, "label <ref> k=v...")
+            m.label(rest[0], **dict(a.partition("=")[::2] for a in rest[1:]))
         elif cmd == "close":
-            m.close(rest[0])
+            m.close(_need(rest, 1, "close <ref>")[0])
         else:
-            raise SystemExit(f"fleet_mux: unknown command {cmd!r}; see --help")
+            raise SystemExit(f"fleet mux: unknown command {cmd!r}; see `fleet mux help`")
     except MuxDown as e:
-        print(f"fleet_mux: {e}", file=sys.stderr)
+        print(f"fleet mux: {e}", file=sys.stderr)
         return 3
     return 0
 

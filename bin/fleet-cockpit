@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fleet_config  # noqa: E402
-from fleet_proc import HerdrDown, herdr_agents  # noqa: E402
+from fleet_proc import HerdrDown  # noqa: E402
 import fleet_mux  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.local/state/fleet")
@@ -166,19 +166,16 @@ def cmd_note(args):
 
 
 def panes():
-    agents = herdr_agents()
-    labels = {}
-    if fleet_mux.backend() == "core":  # hc rows carry their names; a context's name is its fleet.task
-        ws = pl = None
-        for a in agents:
-            labels[a["workspace_id"]] = (a.get("labels") or {}).get("fleet.task")
-    else:
-        ws = run("herdr", "workspace", "list")
-        pl = run("herdr", "pane", "list")
+    agents = fleet_mux.agents()
+    # core rows carry their own names (and a context's name in its task label); herdr keeps
+    # them in its pane and workspace lists. Ids don't overlap, so asking both is harmless.
+    labels = {a["workspace_id"]: (a.get("labels") or {}).get(fleet_mux.TASK) for a in agents}
+    names = {a["pane_id"]: a.get("label") for a in agents}
+    ws = run("herdr", "workspace", "list")
     if ws:
         for w in json.loads(ws)["result"]["workspaces"]:
             labels[w["workspace_id"]] = w.get("label")
-    names = {a["pane_id"]: a.get("label") for a in agents} if fleet_mux.backend() == "core" else {}
+    pl = run("herdr", "pane", "list")
     if pl:
         r2 = json.loads(pl)["result"]
         for x in (r2.get("panes", []) if isinstance(r2, dict) else r2):
@@ -509,9 +506,10 @@ def print_listing(data, as_json=False, show_all=False):
 # ── actions ──────────────────────────────────────────────────────────────────
 
 def focus(pane):
-    if fleet_mux.backend() == "core":
-        return  # herdr-core has no window of its own: the Herdr app (or `hc attach`) shows it
-    run("herdr", "agent", "focus", pane)
+    try:
+        fleet_mux.mux().focus(pane)  # core: a no-op, the Herdr app shows terminals
+    except fleet_mux.MuxDown:
+        pass
 
 
 NEW_CANCELLED = 3  # fleet new's exit when nothing was started
@@ -744,15 +742,13 @@ class UI:
                     self.msg = "n renames an agent pane; this row has none"
                 else:
                     name = self.prompt(f"name for {r['where']}: ")
-                    if name and fleet_mux.backend() == "core":
+                    if name:
+                        m = fleet_mux.mux()
                         try:
-                            ok = fleet_mux.mux().label(r["pane"], **{"fleet.task": name})
+                            m.rename(r["pane"], name)
+                            ok = True
                         except fleet_mux.MuxDown:
                             ok = False
-                        self.data = collect()
-                        self.msg = f"renamed to {name}" if ok else "rename failed"
-                    elif name:
-                        ok = run("herdr", "pane", "rename", r["pane"], name) is not None
                         # herdr's agents panel shows the workspace name. `dev` finds its worktree
                         # contexts by that name, so only rename workspaces that aren't dev worktrees.
                         try:
@@ -761,7 +757,10 @@ class UI:
                             p = {}
                         from fleet_paths import is_linked_worktree
                         if ok and not is_linked_worktree(p.get("root") or p.get("cwd") or "/"):
-                            ok = run("herdr", "workspace", "rename", p["workspace_id"], name) is not None
+                            try:
+                                m.rename_group(p["workspace_id"], name)
+                            except fleet_mux.MuxDown:
+                                ok = False
                         self.data = collect()
                         self.msg = f"renamed to {name}" if ok else "rename failed"
             elif ch == ord("t"):

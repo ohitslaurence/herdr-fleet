@@ -507,10 +507,10 @@ def classify(text, aliases, context=""):
 def open_sessions():
     """Agent panes that are working on something: what Jev compares a new request against."""
     try:
-        if fleet_mux.backend() == "core":  # hc rows carry their own names; groups are worktree names
-            agents = fleet_mux.herdr_rows()
+        if fleet_mux.is_core():  # hc rows carry their own names; groups are worktree names
+            agents = fleet_mux.agents()
             names = {a["pane_id"]: a.get("label") for a in agents}
-            labels = {a["workspace_id"]: (a.get("labels") or {}).get("fleet.task") for a in agents}
+            labels = {a["workspace_id"]: (a.get("labels") or {}).get(fleet_mux.TASK) for a in agents}
         else:
             agents = herdr("agent", "list")["agents"]
             names = {x["pane_id"]: x.get("label") for x in (lambda r: r.get("panes", r) if isinstance(r, dict) else r)(
@@ -887,7 +887,7 @@ def main(argv):
                 + "enter = go · r repos · n name · d description · a agent · m model · "
                 + ("p don't send the sentence" if send else "p start it on the sentence") + " · q cancel › ").strip().lower()
         if a == "j" and dup:
-            if fleet_mux.backend() == "core":
+            if fleet_mux.is_core():
                 print(f"it's {dup['pane']}: open it in the Herdr app, or `hc attach {dup['pane']}`")
             else:
                 run("herdr", "agent", "focus", dup["pane"], check=False)
@@ -969,7 +969,7 @@ def main(argv):
     set_note(primary, d["note"])
     if d.get("polish"):
         polish_later(primary, text, d["repos"])
-    if fleet_mux.backend() == "core":
+    if fleet_mux.is_core():
         return start_on_core(d, primary, by_alias, installs, flags, kind, model, text, send, took, t_create)
     ws = workspace_for(primary)
     if not ws:
@@ -993,12 +993,11 @@ def start_on_core(d, primary, by_alias, installs, flags, kind, model, text, send
     """herdr-core: dev made the context's shell terminal; setup runs in it, and the agent gets a
     terminal of its own, both labelled with the context so every Herdr client groups them."""
     core = fleet_mux.Core()
-    ctx_labels = {"fleet.worktree": primary, "fleet.task": d["slug"],
-                  "fleet.repo_root": by_alias[d["repos"][0]]["path"]}
+    ctx_labels = fleet_mux.context_labels(primary, d["slug"], by_alias[d["repos"][0]]["path"])
     group = os.path.basename(primary)
     if installs:
-        shell = next((r["ref"] for r in (fleet_mux._core_row(t) for t in core._list())
-                      if r["labels"].get("fleet.worktree") == primary and r["kind"] not in fleet_mux.AGENT_PROGRAMS), None)
+        shell = next((t["address"] for t in core.terminals() if (t.get("labels") or {}).get(fleet_mux.WORKTREE) == primary
+                      and t.get("state") != "finished" and not fleet_mux.is_agent(t)), None)
         try:
             if shell:
                 core.send(shell, install_steps(installs))

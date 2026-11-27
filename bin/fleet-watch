@@ -129,7 +129,8 @@ def save_state(s):
 
 
 def agents():
-    return fleet_proc.herdr_agents()  # raises HerdrDown: a pass must not read a dead herdr as "every pane gone"
+    import fleet_mux
+    return fleet_mux.agents()  # raises MuxDown: a pass must not read a dead multiplexer as "every pane gone"
 
 
 _REMOTE = {}
@@ -176,7 +177,7 @@ def mux_read(pane, lines):
 
 def agent_now(pane):
     import fleet_mux
-    return fleet_mux.agent_row(pane)
+    return fleet_mux.get(pane)
 
 
 def recent_text(pane, lines=120):

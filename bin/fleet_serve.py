@@ -354,7 +354,7 @@ class CoreEvents:
 def events_for_backend():
     """The event subscriber class for the configured multiplexer."""
     import fleet_mux
-    return CoreEvents if fleet_mux.backend() == "core" else HerdrEvents
+    return CoreEvents if fleet_mux.is_core() else HerdrEvents
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """dev: registry discovery, context create/reopen, cross, done, prune safety, pr-checkout.
 Run: python3 -m unittest discover -s tests   (no network: herdr, gh and npm are fake
 executables on PATH; repos are temp git repos cloned from local bare "origins")."""
+from unittest import mock
 import importlib.machinery, importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest
 from pathlib import Path
 
@@ -536,10 +537,6 @@ class PrCheckout(DevTestCase):
         self.assertIn("PR #8 comes from a fork", r.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CoreContexts(unittest.TestCase):
     """herdr-core: a context is a worktree plus its labelled terminals, with herdr's status rollup;
     finished terminals stay in it so dev done removes them."""
@@ -553,8 +550,13 @@ class CoreContexts(unittest.TestCase):
                   "status": {"state": "blocked"}},
                  {"address": "t3", "state": "finished", "agent": "codex", "labels": lab},
                  {"address": "t4", "state": "live", "agent": "zsh", "labels": {}}]
-        dev.core_terminals = lambda: terms
-        (ctx,) = dev.core_contexts()
+        with mock.patch.object(dev, "core_terminals", lambda: terms):
+            (ctx,) = dev.core_contexts()
         self.assertEqual((ctx["workspace_id"], ctx["label"], ctx["agent_status"]), ("api-wt-fix", "fix", "blocked"))
         self.assertEqual(ctx["worktree"]["checkout_path"], wt)
         self.assertEqual([t["address"] for t in ctx["terminals"]], ["t1", "t2", "t3"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+

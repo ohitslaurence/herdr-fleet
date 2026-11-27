@@ -8,8 +8,8 @@ import tomllib  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 MANIFEST = os.path.join(ROOT, "herdr-plugin.toml")
-TESTED_HERDR_MAX = "0.9.5"
-TESTED_CORE_MAX = "0.1.22"  # newest herdr-core (hc) a release was tested on; doctor warns past it  # newest herdr a release was tested on; doctor warns past it
+TESTED_HERDR_MAX = "0.9.5"  # newest herdr a release was tested on; doctor warns past it
+TESTED_CORE_MAX = "0.1.22"  # newest herdr-core (hc) a release was tested on; doctor warns past it
 
 
 def manifest():
