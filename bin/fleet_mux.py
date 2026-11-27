@@ -173,8 +173,7 @@ AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
 class Core:
     def agents(self):
         """Terminals running an agent: a known agent program, or one fleet labelled with a kind."""
-        rows = [_core_row(t) for t in self._list()]
-        return [r for r in rows if r["kind"] in AGENT_PROGRAMS or (LABEL + "kind") in r["labels"]]
+        return [r for r in (_core_row(t) for t in self._list()) if _is_agent(r)]
 
     def _list(self):
         """Every terminal with its labels and status. `hc ls` is a summary without them; the first
@@ -232,6 +231,41 @@ class Core:
     def close(self, ref):
         fleet_proc.run(["hc", "kill", ref], timeout=10)
         fleet_proc.run(["hc", "rm", ref], timeout=10)
+
+
+def herdr_shape(t):
+    """An hc terminal as a `herdr agent list` row, for the callers that read those fields (the
+    cockpit, the watcher, doctor). pane_id is the hc address; the workspace is the fleet group,
+    else the checkout the terminal runs in, so one worktree's terminals still group together."""
+    r = _core_row(t)
+    return {"pane_id": r["ref"], "agent": r["kind"], "agent_status": r["status"], "cwd": t.get("cwd"),
+            "foreground_cwd": r["cwd"], "workspace_id": r["group"] or r["cwd"], "tab_id": r["ref"],
+            "label": r["name"], "terminal_title": r["title"], "terminal_title_stripped": r["title"],
+            "agent_session": {"value": r["session"]} if r["session"] else None, "labels": r["labels"],
+            "status_msg": r.get("msg")}
+
+
+def herdr_rows():
+    """Agent rows in herdr's shape on either backend. Raises MuxDown when it can't answer."""
+    if backend() == "core":
+        c = Core()
+        return [herdr_shape(t) for t in c._list() if _is_agent(_core_row(t))]
+    return fleet_proc.herdr_agents_raw()
+
+
+def agent_row(ref):
+    """One agent in herdr's shape, or None if the multiplexer doesn't know it."""
+    try:
+        if backend() == "core":
+            return herdr_shape(_json("hc", ["get", ref, "--json"]))
+        r = _json("herdr", ["agent", "get", ref]).get("result", {})
+        return r.get("agent", r)
+    except MuxDown:
+        return None
+
+
+def _is_agent(r):
+    return r["kind"] in AGENT_PROGRAMS or (LABEL + "kind") in r["labels"]
 
 
 def mux():

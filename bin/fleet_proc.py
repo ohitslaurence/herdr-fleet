@@ -81,7 +81,15 @@ class HerdrDown(RuntimeError):
 
 
 def herdr_agents():
-    """herdr's agent panes. Raises HerdrDown with the reason when herdr can't answer."""
+    """The agents, as `herdr agent list` rows, on whichever multiplexer [mux] backend names (on
+    herdr-core, fleet_mux shapes hc terminals the same way). Raises HerdrDown with the reason when
+    it can't answer."""
+    import fleet_mux
+    return fleet_mux.herdr_rows()
+
+
+def herdr_agents_raw():
+    """herdr's own agent panes. Raises HerdrDown with the reason when herdr can't answer."""
     try:
         p = run(["herdr", "agent", "list"], timeout=10)  # a local socket: slower than this is down
     except FileNotFoundError:

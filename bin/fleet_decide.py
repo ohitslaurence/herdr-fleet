@@ -152,11 +152,11 @@ def _run(*args, timeout=10):
 
 
 def pane_tail(pane, chars=1500):
-    out = _run("herdr", "pane", "read", pane)
+    import fleet_mux
     try:
-        out = json.loads(out)["result"].get("text", out)
-    except (ValueError, KeyError, TypeError, AttributeError):
-        pass
+        out = fleet_mux.mux().read(pane, visible=True)
+    except fleet_mux.MuxDown:
+        out = ""
     lines = [l.rstrip() for l in str(out).splitlines() if l.strip()]
     return "\n".join(lines)[-chars:]
 
