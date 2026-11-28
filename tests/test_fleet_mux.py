@@ -155,8 +155,13 @@ class FakeBins(unittest.TestCase):
     def test_an_orch_worker_opens_in_its_orchestrators_space(self):
         self.three_terminals()
         self.run_mux("core", "spawn", "--cwd", "/w", "--group", "api-wt-w1", "--label", "fleet.by=t1", "--", "claude",
-                     env={"HC_TERMINAL_ID": "t1"})
+                     env={"HC_TERMINAL_ID": "t2"})  # by= wins over whoever ran it
         self.assertIn("herdr.space=sp1", self.run_argv())
+
+    def test_a_worker_whose_orchestrator_has_no_space_gets_its_groups(self):
+        self.fake_core([term("t1", None)])
+        self.run_mux("core", "spawn", "--cwd", "/w", "--group", "api-wt-w1", "--label", "fleet.by=t1", "--", "claude")
+        self.assertIn("herdr.space=" + fleet_mux.group_space("api-wt-w1"), self.run_argv())
 
     def test_core_spawn_keeps_a_space_it_is_given(self):
         self.three_terminals()

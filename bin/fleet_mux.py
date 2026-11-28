@@ -274,7 +274,9 @@ def core_name(name):
 
 def group_space(group):
     """The app space id for a fleet group: the same group always gets the same space. The app
-    makes a space for an id it doesn't know and names it after where its first terminal is."""
+    makes a space for an id it doesn't know and names it after where its first terminal is.
+    Hashed, not the group itself, so it has the app's own id shape (sp + 32 hex) whatever
+    characters the group has; "fleet:" keeps it apart from ids the app makes."""
     return "sp" + hashlib.sha256(f"fleet:{group}".encode()).hexdigest()[:32]
 
 
@@ -336,6 +338,10 @@ class Core:
             return group_space(labels[GROUP])
         spaces = {t.get("address"): (t.get("labels") or {}).get(APP_SPACE) for t in self.terminals()
                   if t.get("state") != "finished"}
+        if labels.get(BY) and spaces.get(labels[BY]):
+            return spaces[labels[BY]]
+        if labels.get(GROUP):
+            return group_space(labels[GROUP])  # a worker whose orchestrator has no space
         top = Counter(s for s in spaces.values() if s).most_common(1)
         return spaces.get(here()) or (top[0][0] if top else None)
 
