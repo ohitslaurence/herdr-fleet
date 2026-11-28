@@ -126,7 +126,9 @@ DEFAULTS = {
     "orch": {"quiet_min": 5},  # a worker idle this long with no status line: orch wait reports it (0 = never)
     # Which multiplexer hosts the agents: "herdr" (the herdr TUI) or "core" (herdr-core, `hc`, which
     # the Herdr app runs on). FLEET_MUX=herdr|core overrides it for one command. See docs/herdr-core.md.
-    "mux": {"backend": "herdr"},
+    # space: the Herdr app space (its id) fleet's core terminals open in; "" = the caller's space,
+    # else the one most terminals are in. The app hides a terminal that has no space.
+    "mux": {"backend": "herdr", "space": ""},
     # Agent harnesses fleet new can start (the program, not the model). Built-ins know only their
     # own command, flags and how to list models; add others as [kinds.<name>]. `names` are words
     # that name the harness itself. Models are separate: each harness's list, plus your own

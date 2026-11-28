@@ -74,7 +74,8 @@ class FakeBins(unittest.TestCase):
         os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
 
     def run_mux(self, backend, *args):
-        env = dict(os.environ, FLEET_MUX=backend, PATH=f"{self.dir}:{SYSTEM_PATH}")
+        env = dict(os.environ, FLEET_MUX=backend, PATH=f"{self.dir}:{SYSTEM_PATH}", HOME=self.dir)
+        env.pop("HC_TERMINAL_ID", None)
         return subprocess.run([sys.executable, os.path.join(BIN, "fleet_mux.py"), *args], env=env,
                               capture_output=True, text=True, timeout=30)
 
@@ -95,17 +96,50 @@ class FakeBins(unittest.TestCase):
         self.assertEqual(rows[0]["agent_status"], "working")
         self.assertEqual(len(self.calls()), 1)
 
+    def fake_core(self, terminals=()):
+        """A fake hc: `events` gives a snapshot of these terminals, `run` answers t9."""
+        snap = {"seq": 1, "terminals": list(terminals)}
+        self.fake("hc", f"print(json.dumps({snap!r} if sys.argv[1] == 'events' else {{'address': 't9'}}))")
+
+    def run_argv(self):
+        return next(c for c in self.calls() if c[0] == "run")
+
     def test_core_spawn_labels_group_and_kind(self):
-        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.fake_core()
         p = self.run_mux("core", "spawn", "--cwd", "/w", "--name", "fix", "--group", "api-wt-fix", "--kind",
                          "claude", "--label", "fleet.by=t1", "--", "claude", "--effort", "high")
         self.assertEqual((p.returncode, p.stdout.strip()), (0, "t9"), p.stderr)
-        argv = self.calls()[0]
+        argv = self.run_argv()
         self.assertEqual(argv[:6], ["run", "--bg", "--json", "--cwd", "/w", "--name"])
         self.assertIn("fleet.group=api-wt-fix", argv)
         self.assertIn("fleet.kind=claude", argv)
         self.assertIn("fleet.by=t1", argv)
         self.assertEqual(program(argv), ["claude", "--effort", "high"])
+
+    def test_core_spawn_opens_in_the_app_space_most_terminals_are_in(self):
+        self.fake_core([term("t1", None, labels={"herdr.space": "sp1"}), term("t2", None, labels={"herdr.space": "sp2"}),
+                        term("t3", None, labels={"herdr.space": "sp2"})])
+        self.run_mux("core", "spawn", "--cwd", "/w", "--", "zsh")
+        self.assertIn("herdr.space=sp2", self.run_argv())
+
+    def test_core_spawn_uses_the_configured_space(self):
+        os.makedirs(os.path.join(self.dir, ".config", "fleet"))
+        with open(os.path.join(self.dir, ".config", "fleet", "config.toml"), "w") as f:
+            f.write('[mux]\nspace = "spX"\n')
+        self.fake_core([term("t1", None, labels={"herdr.space": "sp1"})])
+        self.run_mux("core", "spawn", "--cwd", "/w", "--", "zsh")
+        self.assertIn("herdr.space=spX", self.run_argv())
+
+    def test_core_spawn_prefers_the_callers_space_and_keeps_one_given(self):
+        self.fake_core([term("t1", None, labels={"herdr.space": "sp1"}), term("t2", None, labels={"herdr.space": "sp2"}),
+                        term("t3", None, labels={"herdr.space": "sp2"})])
+        terms = [term("t1", None, labels={"herdr.space": "sp1"}), term("t2", None, labels={"herdr.space": "sp2"})]
+        self.assertEqual(fleet_mux.Core().space(terms, env={"HC_TERMINAL_ID": "t1"}), "sp1")
+        self.assertIsNone(fleet_mux.Core().space([term("t1", None)], env={}))
+        self.run_mux("core", "spawn", "--cwd", "/w", "--label", "herdr.space=mine", "--", "zsh")
+        argv = self.run_argv()
+        self.assertIn("herdr.space=mine", argv)
+        self.assertNotIn("herdr.space=sp2", argv)
 
     def test_core_programs_start_without_the_hc_servers_agent_session(self):
         # hc gives a terminal its server's environment; a server started inside an agent has that
