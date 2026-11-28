@@ -166,6 +166,20 @@ class Move(unittest.TestCase):
         self.herdr.close.assert_called_once_with("p1")
 
 
+    def test_a_name_too_long_for_core_is_shortened(self):
+        with mock.patch.object(M, "up", return_value=True):
+            M.move(self.entry("lighthouse__ligthhouse-review-escalation"), self.herdr, self.core, {})
+        self.assertEqual(self.core.spawn.call_args.kwargs["name"], "lighthouse__ligthhouse-review-es")
+        self.assertEqual(M.core_name("Fix: Login!"), "fix--login")
+        self.assertIsNone(M.core_name("--"))
+
+    def test_a_name_core_still_rejects_falls_back_to_none(self):
+        bad = fleet_mux.MuxDown('bad name "t7"', kind="invalid_params")
+        self.core.spawn.side_effect = [bad, "t8"]
+        with mock.patch.object(M, "up", return_value=True):
+            self.assertEqual(M.move(self.entry("t7"), self.herdr, self.core, {}), "moved to t8")
+        self.assertIsNone(self.core.spawn.call_args.kwargs["name"])
+
     def test_a_taken_name_falls_back_to_none_except_for_an_orch_worker(self):
         taken = fleet_mux.MuxDown('a live terminal is already named "fix"', kind="name_taken")
         self.core.spawn.side_effect = [taken, "t8"]
