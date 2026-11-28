@@ -141,6 +141,23 @@ class FakeBins(unittest.TestCase):
         self.run_mux("core", "spawn", "--cwd", "/w", "--", "zsh", env={"HC_TERMINAL_ID": "t1"})
         self.assertIn("herdr.space=sp1", self.run_argv())
 
+    def test_each_group_gets_a_space_of_its_own(self):
+        self.three_terminals()
+        self.run_mux("core", "spawn", "--cwd", "/w", "--group", "api-wt-fix", "--", "zsh", env={"HC_TERMINAL_ID": "t1"})
+        self.run_mux("core", "spawn", "--cwd", "/w", "--group", "api-wt-fix", "--", "claude")
+        self.run_mux("core", "spawn", "--cwd", "/w", "--group", "web-wt-ui", "--", "claude")
+        spaces = [next(a for a in c if a.startswith("herdr.space=")) for c in self.calls() if c[0] == "run"]
+        self.assertEqual(spaces[0], spaces[1])  # a worktree's shell and agent share one
+        self.assertNotEqual(spaces[0], spaces[2])
+        self.assertNotIn(spaces[0], ("herdr.space=sp1", "herdr.space=sp2"))
+        self.assertEqual(spaces[0], "herdr.space=" + fleet_mux.group_space("api-wt-fix"))
+
+    def test_an_orch_worker_opens_in_its_orchestrators_space(self):
+        self.three_terminals()
+        self.run_mux("core", "spawn", "--cwd", "/w", "--group", "api-wt-w1", "--label", "fleet.by=t1", "--", "claude",
+                     env={"HC_TERMINAL_ID": "t1"})
+        self.assertIn("herdr.space=sp1", self.run_argv())
+
     def test_core_spawn_keeps_a_space_it_is_given(self):
         self.three_terminals()
         self.run_mux("core", "spawn", "--cwd", "/w", "--label", "herdr.space=mine", "--", "zsh")
