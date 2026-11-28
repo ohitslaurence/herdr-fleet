@@ -21,8 +21,8 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
   as they were, to try core first; a later `fleet migrate` takes over that copy instead of starting
   another.
 - Fix (herdr-core): the Herdr app hid every terminal fleet started there, since the app only shows
-  terminals labelled with one of its spaces. Fleet now opens them in `[mux] space`, else the
-  caller's space, else the one most terminals are in.
+  terminals labelled with one of its spaces. Fleet now gives each worktree a space of its own
+  (orch workers join their orchestrator's), or puts them all in `[mux] space` if you set it.
 - Fix: `fleet migrate` no longer leaves an agent behind when its herdr name is one herdr-core
   rejects: it lowercases the name, replaces characters core doesn't allow with `-` and cuts it to
   core's limit (32 characters), and starts it unnamed if core still refuses. Orch workers keep their

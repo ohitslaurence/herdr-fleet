@@ -19,7 +19,7 @@ CLI (for bash callers such as orch), JSON out unless noted; help anywhere prints
   fleet mux spawn --cwd D [--name N] [--label k=v]... [--group G] [--kind K] -- <argv>...   (core)
   fleet mux label <ref> k=v... (core) | close <ref>
 """
-import json, os, re, sys
+import hashlib, json, os, re, sys
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -272,6 +272,14 @@ def core_name(name):
     return name.strip("-_.") or None
 
 
+def group_space(group):
+    """The app space id for a fleet group: the same group always gets the same space. The app
+    makes a space for an id it doesn't know and names it after where its first terminal is.
+    Hashed, not the group itself, so it has the app's own id shape (sp + 32 hex) whatever
+    characters the group has; "fleet:" keeps it apart from ids the app makes."""
+    return "sp" + hashlib.sha256(f"fleet:{group}".encode()).hexdigest()[:32]
+
+
 class Core:
     name = "core"
 
@@ -318,15 +326,22 @@ class Core:
     def rename_group(self, group, name):
         pass  # a group is its terminals' labels; rename() already relabelled the one that matters
 
-    def space(self):
-        """The Herdr app space a new terminal opens in: [mux] space, else the calling terminal's,
-        else the one most live terminals are in (None when the app has none yet)."""
+    def space(self, labels):
+        """The Herdr app space a new terminal opens in, like a herdr workspace: [mux] space if set;
+        an orch worker joins its orchestrator's; else its group's own space (made by the app the
+        first time it sees the id); else the caller's, or the one most live terminals are in."""
         import fleet_config
         configured = fleet_config.get("mux", "space", "")
         if configured:
             return configured
+        if labels.get(GROUP) and not labels.get(BY):
+            return group_space(labels[GROUP])
         spaces = {t.get("address"): (t.get("labels") or {}).get(APP_SPACE) for t in self.terminals()
                   if t.get("state") != "finished"}
+        if labels.get(BY) and spaces.get(labels[BY]):
+            return spaces[labels[BY]]
+        if labels.get(GROUP):
+            return group_space(labels[GROUP])  # a worker whose orchestrator has no space
         top = Counter(s for s in spaces.values() if s).most_common(1)
         return spaces.get(here()) or (top[0][0] if top else None)
 
@@ -340,7 +355,7 @@ class Core:
         if kind:
             labels[KIND] = kind
         if APP_SPACE not in labels:
-            space = self.space()
+            space = self.space(labels)
             if space:
                 labels[APP_SPACE] = space
             else:

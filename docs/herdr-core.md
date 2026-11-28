@@ -45,11 +45,15 @@ with labels, which every Herdr client can read:
 | `fleet.session` | The harness session `fleet migrate` resumed there |
 
 The Herdr app shows only terminals that carry its own `herdr.space` label (a space id), each in
-a tab of that space. Fleet sets it on every terminal it starts: `[mux] space` if you set it,
-else the space of the terminal you ran the command from, else the space most terminals are in.
-To find a space's id, read the label off a terminal in it: `hc get <t> --json`. Before the app
-has made any space there's nothing to join, and fleet's terminals stay hidden until you label
-them (`hc label <t> herdr.space=<id>`).
+a tab of that space; an id the app doesn't know becomes a new space. Fleet sets it on every
+terminal it starts, the way herdr had a workspace per worktree: each `fleet.group` gets a space
+of its own (its id is derived from the group, so a worktree's shell and agent share one), and an
+orch worker opens in its orchestrator's space. To put everything in one space instead, set
+`[mux] space` to its id (read it off a terminal in it: `hc get <t> --json`). A terminal with no
+group (`fleet mux spawn` without `--group`) opens in the caller's space, else the one most
+terminals are in; with no space on the core at all, fleet warns that the app won't show it, and
+`hc label <t> herdr.space=<id>` places it later. The app doesn't move a terminal it already shows
+when its label changes: start it again instead.
 
 ## What each tool does there
 
