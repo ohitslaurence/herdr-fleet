@@ -206,11 +206,12 @@ def move(e, herdr, core, workers, keep=False):
     spawn = lambda name: core.spawn(e["argv"], e["cwd"], name=name, labels=e["labels"], group=e["group"], kind=e["kind"])
     try:
         try:
-            ref = spawn(e["name"])
+            ref = spawn(e["name"] if e["pane"] in workers else fleet_mux.core_name(e["name"]))
         except fleet_mux.MuxDown as err:
-            if not e["name"] or err.kind != "name_taken" or e["pane"] in workers:
+            unusable = err.kind == "name_taken" or (err.kind == "invalid_params" and "bad name" in str(err))
+            if not e["name"] or not unusable or e["pane"] in workers:
                 raise  # orch drives a worker by name: it can't move without it
-            ref = spawn(None)  # names are unique among live terminals; its title still says what it is
+            ref = spawn(None)  # taken (unique among live terminals), or id-shaped; its title says what it is
     except fleet_mux.MuxDown as err:
         return f"stays: herdr-core couldn't start it: {err}"
     if not up(core, ref):

@@ -188,5 +188,19 @@ class FakeBins(unittest.TestCase):
         self.assertEqual(p.stdout, "")
 
 
+
+class CoreName(unittest.TestCase):
+    def test_a_name_becomes_one_core_takes(self):
+        self.assertEqual(fleet_mux.core_name("Fix: Login!"), "fix--login")
+        self.assertEqual(len(fleet_mux.core_name("x" * 50)), fleet_mux.NAME_MAX)
+        self.assertIsNone(fleet_mux.core_name("--"))
+        self.assertIsNone(fleet_mux.core_name(None))
+
+    def test_the_changelog_states_the_limit(self):
+        with open(os.path.join(BIN, "..", "CHANGELOG.md")) as f:
+            changelog = f.read()
+        self.assertIn(f"({fleet_mux.NAME_MAX} characters)", changelog)
+
+
 if __name__ == "__main__":
     unittest.main()

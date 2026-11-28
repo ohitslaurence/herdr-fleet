@@ -20,6 +20,10 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 - New: `fleet migrate --keep` starts the copy on core and leaves the herdr pane and fleet's records
   as they were, to try core first; a later `fleet migrate` takes over that copy instead of starting
   another.
+- Fix: `fleet migrate` no longer leaves an agent behind when its herdr name is one herdr-core
+  rejects: it lowercases the name, replaces characters core doesn't allow with `-` and cuts it to
+  core's limit (32 characters), and starts it unnamed if core still refuses. Orch workers keep their
+  exact names.
 - Fix (herdr-core): programs fleet starts there could inherit the agent that first started hc
   (its herdr pane, and Claude Code's child-session marker, under which a resumed Claude saves no
   transcript). Fleet now unsets them in everything it starts, and `fleet doctor` warns when hc's
