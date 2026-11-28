@@ -44,6 +44,13 @@ with labels, which every Herdr client can read:
 | `fleet.by` | An orch worker's orchestrator terminal |
 | `fleet.session` | The harness session `fleet migrate` resumed there |
 
+The Herdr app shows only terminals that carry its own `herdr.space` label (a space id), each in
+a tab of that space. Fleet sets it on every terminal it starts: `[mux] space` if you set it,
+else the space of the terminal you ran the command from, else the space most terminals are in.
+To find a space's id, read the label off a terminal in it: `hc get <t> --json`. Before the app
+has made any space there's nothing to join, and fleet's terminals stay hidden until you label
+them (`hc label <t> herdr.space=<id>`).
+
 ## What each tool does there
 
 | Tool | On herdr-core |

@@ -20,6 +20,7 @@ CLI (for bash callers such as orch), JSON out unless noted; help anywhere prints
   fleet mux label <ref> k=v... (core) | close <ref>
 """
 import json, os, re, sys
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_proc  # noqa: E402
@@ -36,6 +37,7 @@ WORKTREE = "fleet.worktree"      # a dev context's checkout
 TASK = "fleet.task"              # a dev context's task name
 REPO_ROOT = "fleet.repo_root"    # a dev context's repo
 SESSION = "fleet.session"        # the harness session it resumed (fleet migrate)
+APP_SPACE = "herdr.space"        # the Herdr app space showing it (the app's label: it hides terminals without one)
 
 AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
 
@@ -316,6 +318,18 @@ class Core:
     def rename_group(self, group, name):
         pass  # a group is its terminals' labels; rename() already relabelled the one that matters
 
+    def space(self):
+        """The Herdr app space a new terminal opens in: [mux] space, else the calling terminal's,
+        else the one most live terminals are in (None when the app has none yet)."""
+        import fleet_config
+        configured = fleet_config.get("mux", "space", "")
+        if configured:
+            return configured
+        spaces = {t.get("address"): (t.get("labels") or {}).get(APP_SPACE) for t in self.terminals()
+                  if t.get("state") != "finished"}
+        top = Counter(s for s in spaces.values() if s).most_common(1)
+        return spaces.get(here()) or (top[0][0] if top else None)
+
     def spawn(self, argv, cwd, name=None, labels=None, group=None, kind=None):
         argv = list(argv)
         if kind == "codex" and "--no-daemon" not in argv and takes_flag(argv[0], "--no-daemon"):
@@ -325,6 +339,13 @@ class Core:
             labels[GROUP] = group
         if kind:
             labels[KIND] = kind
+        if APP_SPACE not in labels:
+            space = self.space()
+            if space:
+                labels[APP_SPACE] = space
+            else:
+                print("fleet: no Herdr app space on this core yet, so the app won't show this terminal "
+                      "(set [mux] space, or hc label it herdr.space=<id> later)", file=sys.stderr)
         args = ["run", "--bg", "--json", "--cwd", cwd]
         if name:
             args += ["--name", name]
