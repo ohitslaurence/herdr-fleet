@@ -17,6 +17,9 @@ then tag the merge commit `v<version>` (annotated) and push the tag.
 - New: `fleet migrate [--dry-run] --all|<pane>...` moves idle herdr agents onto herdr-core by
   resuming their sessions in the same worktree, with their own flags; fleet's records of each
   (orch meta, ship ledgers, notes, inbox) follow it. A failed resume leaves the herdr pane alone.
+- New: `fleet migrate --keep` starts the copy on core and leaves the herdr pane and fleet's records
+  as they were, to try core first; a later `fleet migrate` takes over that copy instead of starting
+  another.
 - Fix (herdr-core): programs fleet starts there could inherit the agent that first started hc
   (its herdr pane, and Claude Code's child-session marker, under which a resumed Claude saves no
   transcript). Fleet now unsets them in everything it starts, and `fleet doctor` warns when hc's

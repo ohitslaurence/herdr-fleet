@@ -42,6 +42,7 @@ with labels, which every Herdr client can read:
 | `fleet.kind` | The agent harness: `claude`, `codex`, `opencode` |
 | `fleet.worktree`, `fleet.task`, `fleet.repo_root` | The dev context: its checkout, its task name, its repo |
 | `fleet.by` | An orch worker's orchestrator terminal |
+| `fleet.session` | The harness session `fleet migrate` resumed there |
 
 ## What each tool does there
 
@@ -91,6 +92,13 @@ fleet migrate --all               # asks first; --yes to skip
   fleet can't resume (opencode); name a pane or agent to move it anyway. The pane running
   `fleet migrate` stays: run it from another.
 - Stop the watcher first: it keeps its inbox in memory and would write the old panes back.
+
+To try core before committing, `fleet migrate --keep` starts the copies and changes nothing else:
+the herdr panes stay open and fleet's records still point at them. Both sides resume the same
+session, so type into one at a time, and keep the watcher stopped meanwhile (it would prompt
+both). Happy? Run `fleet migrate` on the same agents without `--keep`: it finds each copy by its
+`fleet.session` label, moves the records to it and closes the herdr pane. Not happy? Close the
+copies (`hc kill`) and carry on in herdr.
 
 ## Setup
 

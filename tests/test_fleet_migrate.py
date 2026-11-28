@@ -1,5 +1,6 @@
 """fleet migrate restarts a herdr agent on herdr-core with its session and its own flags, moves
-only idle agents, leaves the herdr pane alone when the resume fails, and repoints fleet's records."""
+only idle agents, leaves the herdr pane alone when the resume fails, and repoints fleet's records.
+--keep leaves the herdr side as it was; a later run takes over the copy instead of starting another."""
 import json, os, sys, tempfile, unittest
 from pathlib import Path
 from unittest import mock
@@ -61,6 +62,18 @@ class Plan(unittest.TestCase):
         self.assertNotIn("skip", e)
         (e,) = self.plan([dict(row("p3"), name="smoke")], picked={"smoke"})  # by herdr's agent name
         self.assertEqual(e["name"], "smoke")
+
+    def test_the_terminal_is_labelled_with_its_session(self):
+        (e,) = self.plan([row("p1")])
+        self.assertEqual(e["labels"][fleet_mux.SESSION], "s-1")
+
+    def test_a_session_with_a_live_copy_on_core_moves_to_it(self):
+        live = M.copies([{"address": "t3", "labels": {fleet_mux.SESSION: "s-1"}},
+                         {"address": "t4", "labels": {fleet_mux.SESSION: "s-2"}, "state": "finished"}])
+        self.assertEqual(live, {"s-1": "t3"})
+        a, b = M.plan([row("p1"), row("p2", sid="s-2")], lambda p: ["claude"], {}, {}, {}, None, copies=live)
+        self.assertEqual(a["copy"], "t3")
+        self.assertNotIn("copy", b)
 
     def test_an_orch_worker_keeps_its_worker_name(self):
         (e,) = self.plan([row("p1")], workers={"p1": ("/o/w1", {"name": "w1"})})
@@ -137,6 +150,23 @@ class Move(unittest.TestCase):
         self.core.close.assert_called_once_with("t7")
         self.herdr.close.assert_not_called()
         self.repoint.assert_not_called()
+
+    def test_keep_leaves_the_herdr_pane_and_the_records(self):
+        with mock.patch.object(M, "up", return_value=True):
+            result = M.move(self.entry(), self.herdr, self.core, {}, keep=True)
+        self.assertEqual(result, "copied to t7; the herdr pane stays")
+        self.repoint.assert_not_called()
+        self.herdr.close.assert_not_called()
+
+    def test_a_later_run_takes_over_the_copy(self):
+        e = dict(self.entry(), copy="t3")
+        self.assertEqual(M.move(e, self.herdr, self.core, {}), "moved to its copy t3")
+        self.core.spawn.assert_not_called()
+        self.repoint.assert_called_once_with("p1", "t3", worker_dir=None)
+        self.herdr.close.assert_called_once_with("p1")
+        self.herdr.close.reset_mock()
+        self.assertEqual(M.move(e, self.herdr, self.core, {}, keep=True), "already on core as t3")
+        self.herdr.close.assert_not_called()
 
     def test_a_taken_name_falls_back_to_none_except_for_an_orch_worker(self):
         taken = fleet_mux.MuxDown('a live terminal is already named "fix"', kind="name_taken")
