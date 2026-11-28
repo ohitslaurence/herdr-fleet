@@ -35,6 +35,7 @@ BY = "fleet.by"                  # an orch worker's orchestrator terminal
 WORKTREE = "fleet.worktree"      # a dev context's checkout
 TASK = "fleet.task"              # a dev context's task name
 REPO_ROOT = "fleet.repo_root"    # a dev context's repo
+SESSION = "fleet.session"        # the harness session it resumed (fleet migrate)
 
 AGENT_PROGRAMS = ("claude", "codex", "opencode", "pi")
 
