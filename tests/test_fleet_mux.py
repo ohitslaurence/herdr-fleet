@@ -197,7 +197,8 @@ class CoreName(unittest.TestCase):
         self.assertIsNone(fleet_mux.core_name(None))
 
     def test_the_changelog_states_the_limit(self):
-        changelog = open(os.path.join(BIN, "..", "CHANGELOG.md")).read()
+        with open(os.path.join(BIN, "..", "CHANGELOG.md")) as f:
+            changelog = f.read()
         self.assertIn(f"({fleet_mux.NAME_MAX} characters)", changelog)
 
 
