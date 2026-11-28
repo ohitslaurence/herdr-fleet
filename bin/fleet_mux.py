@@ -20,6 +20,7 @@ CLI (for bash callers such as orch), JSON out unless noted; help anywhere prints
   fleet mux label <ref> k=v... (core) | close <ref>
 """
 import json, os, re, sys
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_proc  # noqa: E402
@@ -317,27 +318,17 @@ class Core:
     def rename_group(self, group, name):
         pass  # a group is its terminals' labels; rename() already relabelled the one that matters
 
-    def space(self, terminals=None, env=None):
+    def space(self):
         """The Herdr app space a new terminal opens in: [mux] space, else the calling terminal's,
         else the one most live terminals are in (None when the app has none yet)."""
         import fleet_config
         configured = fleet_config.get("mux", "space", "")
         if configured:
             return configured
-        try:
-            terminals = self.terminals() if terminals is None else terminals
-        except MuxDown:
-            return None
-        spaces = {t.get("address"): (t.get("labels") or {}).get(APP_SPACE) for t in terminals
+        spaces = {t.get("address"): (t.get("labels") or {}).get(APP_SPACE) for t in self.terminals()
                   if t.get("state") != "finished"}
-        mine = spaces.get(here(env))
-        if mine:
-            return mine
-        counts = {}
-        for s in spaces.values():
-            if s:
-                counts[s] = counts.get(s, 0) + 1
-        return max(counts, key=counts.get) if counts else None
+        top = Counter(s for s in spaces.values() if s).most_common(1)
+        return spaces.get(here()) or (top[0][0] if top else None)
 
     def spawn(self, argv, cwd, name=None, labels=None, group=None, kind=None):
         argv = list(argv)
@@ -352,6 +343,9 @@ class Core:
             space = self.space()
             if space:
                 labels[APP_SPACE] = space
+            else:
+                print("fleet: no Herdr app space on this core yet, so the app won't show this terminal "
+                      "(set [mux] space, or hc label it herdr.space=<id> later)", file=sys.stderr)
         args = ["run", "--bg", "--json", "--cwd", cwd]
         if name:
             args += ["--name", name]

@@ -226,9 +226,10 @@ case "$1 $2" in
 esac
 """
 FAKE_HC = r"""#!/usr/bin/env bash
-# herdr-core: run logs its argv and answers t9; read replays screens like FAKE_HERDR
+# herdr-core: run logs its argv and answers t9; events: no terminals; read replays screens like FAKE_HERDR
 case "$1" in
   run) shift; printf '%s\n' "$@" > "$FAKE/hc-run"; echo '{"address":"t9"}';;
+  events) echo '{"seq":1,"terminals":[]}';;
   read) n=$(( $(cat "$FAKE/reads" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE/reads"
         while [[ $n -gt 1 && ! -f "$FAKE/screens/$n.txt" ]]; do n=$((n-1)); done
         cat "$FAKE/screens/$n.txt";;

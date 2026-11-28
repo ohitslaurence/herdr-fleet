@@ -73,9 +73,11 @@ class FakeBins(unittest.TestCase):
             f.write(f"#!/usr/bin/env python3\nimport json, sys\nopen({self.log!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n{body}\n")
         os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
 
-    def run_mux(self, backend, *args):
+    def run_mux(self, backend, *args, env=None):
+        extra = env or {}
         env = dict(os.environ, FLEET_MUX=backend, PATH=f"{self.dir}:{SYSTEM_PATH}", HOME=self.dir)
         env.pop("HC_TERMINAL_ID", None)
+        env.update(extra)
         return subprocess.run([sys.executable, os.path.join(BIN, "fleet_mux.py"), *args], env=env,
                               capture_output=True, text=True, timeout=30)
 
@@ -130,16 +132,26 @@ class FakeBins(unittest.TestCase):
         self.run_mux("core", "spawn", "--cwd", "/w", "--", "zsh")
         self.assertIn("herdr.space=spX", self.run_argv())
 
-    def test_core_spawn_prefers_the_callers_space_and_keeps_one_given(self):
+    def three_terminals(self):
         self.fake_core([term("t1", None, labels={"herdr.space": "sp1"}), term("t2", None, labels={"herdr.space": "sp2"}),
                         term("t3", None, labels={"herdr.space": "sp2"})])
-        terms = [term("t1", None, labels={"herdr.space": "sp1"}), term("t2", None, labels={"herdr.space": "sp2"})]
-        self.assertEqual(fleet_mux.Core().space(terms, env={"HC_TERMINAL_ID": "t1"}), "sp1")
-        self.assertIsNone(fleet_mux.Core().space([term("t1", None)], env={}))
+
+    def test_core_spawn_prefers_the_callers_space(self):
+        self.three_terminals()
+        self.run_mux("core", "spawn", "--cwd", "/w", "--", "zsh", env={"HC_TERMINAL_ID": "t1"})
+        self.assertIn("herdr.space=sp1", self.run_argv())
+
+    def test_core_spawn_keeps_a_space_it_is_given(self):
+        self.three_terminals()
         self.run_mux("core", "spawn", "--cwd", "/w", "--label", "herdr.space=mine", "--", "zsh")
-        argv = self.run_argv()
-        self.assertIn("herdr.space=mine", argv)
-        self.assertNotIn("herdr.space=sp2", argv)
+        self.assertEqual([a for a in self.run_argv() if a.startswith("herdr.space=")], ["herdr.space=mine"])
+
+    def test_core_spawn_with_no_space_anywhere_says_the_app_wont_show_it(self):
+        self.fake_core([term("t1", None)])
+        p = self.run_mux("core", "spawn", "--cwd", "/w", "--", "zsh")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(any(a.startswith("herdr.space=") for a in self.run_argv()))
+        self.assertIn("won't show", p.stderr)
 
     def test_core_programs_start_without_the_hc_servers_agent_session(self):
         # hc gives a terminal its server's environment; a server started inside an agent has that
@@ -149,6 +161,7 @@ class FakeBins(unittest.TestCase):
         with open(probe, "w") as f:
             f.write(f"import json, os\nopen({envlog!r}, 'w').write(json.dumps([k for k in {keys!r} if k in os.environ]))\n")
         self.fake("hc", f"import os, subprocess\n"
+                        f"if sys.argv[1] == 'events': print(json.dumps({{'seq': 1, 'terminals': []}})); sys.exit()\n"
                         f"subprocess.run(sys.argv[sys.argv.index('--') + 1:], env=dict(os.environ, **dict.fromkeys({keys!r}, '1')))\n"
                         f"print(json.dumps({{'address': 't9'}}))")
         p = self.run_mux("core", "spawn", "--cwd", "/w", "--", sys.executable, probe)
@@ -163,7 +176,7 @@ class FakeBins(unittest.TestCase):
         self.assertEqual(self.calls(), [["read", "t2"], ["read", "t2", "--lines", "80"]])
 
     def test_core_spawn_adds_no_daemon_for_a_codex_that_takes_it(self):
-        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.fake_core()
         self.fake("codex", "print('      --no-daemon  run in this terminal')")
         self.run_mux("core", "spawn", "--cwd", "/w", "--kind", "codex", "--", "codex", "--yolo")
         argv = next(c for c in self.calls() if c[:1] == ["run"])
@@ -171,14 +184,14 @@ class FakeBins(unittest.TestCase):
 
     def test_core_spawn_leaves_an_older_codex_alone(self):
         # codex 0.153 has no --no-daemon: passing it makes codex exit at once
-        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.fake_core()
         self.fake("codex", "print('      --no-alt-screen')")
         self.run_mux("core", "spawn", "--cwd", "/w", "--kind", "codex", "--", "codex", "--yolo")
         argv = next(c for c in self.calls() if c[:1] == ["run"])
         self.assertEqual(program(argv), ["codex", "--yolo"])
 
     def test_cli_help_anywhere_does_nothing_else(self):
-        self.fake("hc", "print(json.dumps({'address': 't9'}))")
+        self.fake_core()
         p = self.run_mux("core", "spawn", "--cwd", "/w", "--", "claude", "--help")
         self.assertIn("fleet mux backend", p.stdout)
         self.assertFalse(os.path.exists(self.log))
@@ -211,7 +224,7 @@ class FakeBins(unittest.TestCase):
         self.fake("hc", f"sys.stderr.write(json.dumps({err!r}) + '\\n'); sys.exit(1)")
         with mock.patch.dict(os.environ, {"PATH": f"{self.dir}:{SYSTEM_PATH}"}):
             with self.assertRaises(fleet_mux.MuxDown) as cm:
-                fleet_mux.Core().spawn(["claude"], "/w", name="fix")
+                fleet_mux.Core().spawn(["claude"], "/w", name="fix", labels={"herdr.space": "sp1"})
         self.assertEqual((cm.exception.kind, str(cm.exception)), ("name_taken", 'a live terminal is already named "fix"'))
 
     def test_down_is_an_error_not_empty(self):
