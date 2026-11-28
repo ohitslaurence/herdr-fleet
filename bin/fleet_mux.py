@@ -259,6 +259,17 @@ def herdr_shape(t):
             "pid": t.get("pid"), "state": t.get("state")}
 
 
+# herdr-core's rule for terminal names: up to NAME_MAX of a-z 0-9 - _ . starting with a letter
+# or digit (and not shaped like a terminal id, which only hc can tell).
+NAME_MAX = 32
+
+
+def core_name(name):
+    """name made into one herdr-core accepts: lowercased, other characters as '-', cut to NAME_MAX."""
+    name = re.sub(r"[^a-z0-9._-]", "-", (name or "").lower())[:NAME_MAX]
+    return name.strip("-_.") or None
+
+
 class Core:
     name = "core"
 

@@ -22,7 +22,7 @@ Stop the watcher first (`fleet server stop`), and set [mux] backend = "core" bef
 again: it holds its inbox in memory and follows one backend. Keep it stopped while you try
 --keep copies, or it would prompt both.
 """
-import os, re, subprocess, sys, time
+import os, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_config, fleet_mux, fleet_state  # noqa: E402
@@ -200,23 +200,18 @@ def finish(e, ref, herdr, workers, how="moved to"):
     return f"{how} {ref}"
 
 
-def core_name(name):
-    """name as herdr-core takes one: up to 32 of a-z 0-9 - _ . (herdr allows longer names)."""
-    name = re.sub(r"[^a-z0-9._-]", "-", (name or "").lower())[:32]
-    return name.strip("-_.") or None
-
-
 def move(e, herdr, core, workers, keep=False):
     if "copy" in e:
         return finish(e, e["copy"], herdr, workers, "moved to its copy")
     spawn = lambda name: core.spawn(e["argv"], e["cwd"], name=name, labels=e["labels"], group=e["group"], kind=e["kind"])
     try:
         try:
-            ref = spawn(e["name"] if e["pane"] in workers else core_name(e["name"]))
+            ref = spawn(e["name"] if e["pane"] in workers else fleet_mux.core_name(e["name"]))
         except fleet_mux.MuxDown as err:
-            if not e["name"] or err.kind not in ("name_taken", "invalid_params") or e["pane"] in workers:
+            unusable = err.kind == "name_taken" or (err.kind == "invalid_params" and "bad name" in str(err))
+            if not e["name"] or not unusable or e["pane"] in workers:
                 raise  # orch drives a worker by name: it can't move without it
-            ref = spawn(None)  # taken (unique among live terminals) or still unusable; its title says what it is
+            ref = spawn(None)  # taken (unique among live terminals), or id-shaped; its title says what it is
     except fleet_mux.MuxDown as err:
         return f"stays: herdr-core couldn't start it: {err}"
     if not up(core, ref):

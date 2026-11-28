@@ -170,8 +170,19 @@ class Move(unittest.TestCase):
         with mock.patch.object(M, "up", return_value=True):
             M.move(self.entry("lighthouse__ligthhouse-review-escalation"), self.herdr, self.core, {})
         self.assertEqual(self.core.spawn.call_args.kwargs["name"], "lighthouse__ligthhouse-review-es")
-        self.assertEqual(M.core_name("Fix: Login!"), "fix--login")
-        self.assertIsNone(M.core_name("--"))
+
+    def test_an_orch_worker_keeps_its_exact_name_or_stays(self):
+        long = "a-worker-name-longer-than-core-allows"
+        self.core.spawn.side_effect = fleet_mux.MuxDown(f'bad name "{long}"', kind="invalid_params")
+        result = M.move(self.entry(long), self.herdr, self.core, {"p1": ("/o/w", {"name": long})})
+        self.assertTrue(result.startswith("stays"), result)
+        self.assertEqual(self.core.spawn.call_args.kwargs["name"], long)
+        self.assertEqual(self.core.spawn.call_count, 1)
+
+    def test_other_bad_params_are_not_retried_unnamed(self):
+        self.core.spawn.side_effect = fleet_mux.MuxDown("bad cwd", kind="invalid_params")
+        self.assertIn("bad cwd", M.move(self.entry(), self.herdr, self.core, {}))
+        self.assertEqual(self.core.spawn.call_count, 1)
 
     def test_a_name_core_still_rejects_falls_back_to_none(self):
         bad = fleet_mux.MuxDown('bad name "t7"', kind="invalid_params")
