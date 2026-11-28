@@ -48,6 +48,8 @@ DROP_BOOL = {"claude": {"--continue", "-c", "--fork-session"}, "codex": {"--last
 DROP_VALUE = {"claude": {"--resume", "-r", "--session-id", "--append-system-prompt", "--system-prompt"}, "codex": set()}
 
 MOVABLE = ("idle", "done")
+MOVE_NEXT = "next: set [mux] backend = \"core\", then `fleet server start` (stop it first if it's running)"
+KEEP_NEXT = "next: try them on core with the watcher stopped; happy? `fleet migrate` the same agents without --keep"
 
 
 def carry_flags(kind, argv):
@@ -96,10 +98,10 @@ def orch_workers():
     return {meta.get("pane"): (d, meta) for d, meta, _ in fleet_orch.workers(fleet_orch.home()) if meta.get("pane")}
 
 
-def plan(rows, argv_of, names, tasks, workers, here, picked=None, reports=lambda kind: True, copies=None):
+def plan(rows, argv_of, names, tasks, workers, here, picked=None, reports=lambda kind: True, on_core=None):
     """One entry per herdr agent: what it would be started as on core, or why it stays.
-    copies maps a session id to the live core terminal a --keep run already started for it."""
-    out, copies = [], copies or {}
+    on_core maps a session id to a live core terminal fleet migrate already resumed it in."""
+    out, on_core = [], on_core or {}
     for a in rows:
         pane, kind = a["pane_id"], a.get("agent")
         name = a.get("name") or names.get(pane)  # herdr's agent name, else the pane's label
@@ -122,8 +124,8 @@ def plan(rows, argv_of, names, tasks, workers, here, picked=None, reports=lambda
             e["skip"] = "herdr doesn't know its session id"
         elif not named and not reports(kind):
             e["skip"] = f"{kind} here doesn't report its status to herdr-core (name it to move it anyway)"
-        if "skip" not in e and sid in copies:
-            e["copy"] = copies[sid]
+        if "skip" not in e and sid in on_core:
+            e["copy"] = on_core[sid]
         elif "skip" not in e:
             prog = fleet_config.agent_kinds().get(kind, {}).get("cmd", [kind])[0]
             e["argv"] = RESUME[kind](prog, carry_flags(kind, argv_of(pane)), sid)
@@ -180,8 +182,9 @@ def up(core, ref, wait=6.0):
     return True
 
 
-def copies(terminals):
-    """{session id: address} of the live core terminals fleet migrate started."""
+def core_copies(terminals):
+    """{session id: address} of the live core terminals fleet migrate started (all of them carry
+    the session label; a --keep copy is one whose herdr pane is still open)."""
     return {(t.get("labels") or {})[fleet_mux.SESSION]: t.get("address") for t in terminals
             if t.get("state") != "finished" and (t.get("labels") or {}).get(fleet_mux.SESSION)}
 
@@ -199,7 +202,7 @@ def finish(e, ref, herdr, workers, how="moved to"):
 
 def move(e, herdr, core, workers, keep=False):
     if "copy" in e:
-        return "already on core as " + e["copy"] if keep else finish(e, e["copy"], herdr, workers, "moved to its copy")
+        return finish(e, e["copy"], herdr, workers, "moved to its copy")
     spawn = lambda name: core.spawn(e["argv"], e["cwd"], name=name, labels=e["labels"], group=e["group"], kind=e["kind"])
     try:
         try:
@@ -223,10 +226,12 @@ def move(e, herdr, core, workers, keep=False):
     return finish(e, ref, herdr, workers)
 
 
-def describe(e):
+def describe(e, keep=False):
     who = f"{e['pane']}" + (f" ({e['name']})" if e.get("name") else "")
     if "skip" in e:
         return f"  stays  {who:32} {e['kind']}: {e['skip']}"
+    if "copy" in e and keep:
+        return f"  stays  {who:32} {e['kind']}: already on core as {e['copy']}"
     if "copy" in e:
         return f"  move   {who:32} {e['kind']}: to {e['copy']}, the copy already on core"
     return f"  move   {who:32} {e['kind']} in {e['cwd']}\n         as: {' '.join(e['argv'])}"
@@ -252,7 +257,7 @@ def gather(picked):
 
     workers = orch_workers()
     return herdr, core, workers, plan(rows, argv_of, names, tasks, workers, fleet_mux.here(), picked, reports,
-                                       copies(live))
+                                       core_copies(live))
 
 
 def main(argv):
@@ -278,17 +283,18 @@ def main(argv):
         if missing:
             print(f"fleet migrate: no herdr agent {', '.join(sorted(missing))}", file=sys.stderr)
             return 2
+    verb, after = ("copy", KEEP_NEXT) if keep else ("move", MOVE_NEXT)
     for e in entries:
-        print(describe(e))
-    todo = [e for e in entries if "skip" not in e]
+        print(describe(e, keep))
+    todo = [e for e in entries if "skip" not in e and not (keep and "copy" in e)]
     if dry or not todo:
-        print(f"{len(todo)} would {'be copied' if keep else 'move'}" if dry else "nothing to move")
+        print(f"{len(todo)} to {verb}" if dry else f"nothing to {verb}")
         return 0
     if not yes:
         if not sys.stdin.isatty():
             print("fleet migrate: pass --yes to move them without a terminal to ask on", file=sys.stderr)
             return 2
-        if input(f"{'copy' if keep else 'move'} {len(todo)}? [y/N] ").strip().lower() != "y":
+        if input(f"{verb} {len(todo)}? [y/N] ").strip().lower() != "y":
             return 1
     failed = 0
     for e in todo:
@@ -303,10 +309,7 @@ def main(argv):
         result = move(e, herdr, core, workers, keep)
         failed += result.startswith("stays")
         print(f"  {e['pane']}: {result}")
-    if keep:
-        print("next: try them on core with the watcher stopped; happy? `fleet migrate` the same agents without --keep")
-    else:
-        print("next: set [mux] backend = \"core\", then `fleet server start` (stop it first if it's running)")
+    print(after)
     return 1 if failed else 0
 
 

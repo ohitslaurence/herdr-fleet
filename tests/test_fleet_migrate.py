@@ -68,10 +68,10 @@ class Plan(unittest.TestCase):
         self.assertEqual(e["labels"][fleet_mux.SESSION], "s-1")
 
     def test_a_session_with_a_live_copy_on_core_moves_to_it(self):
-        live = M.copies([{"address": "t3", "labels": {fleet_mux.SESSION: "s-1"}},
+        live = M.core_copies([{"address": "t3", "labels": {fleet_mux.SESSION: "s-1"}},
                          {"address": "t4", "labels": {fleet_mux.SESSION: "s-2"}, "state": "finished"}])
         self.assertEqual(live, {"s-1": "t3"})
-        a, b = M.plan([row("p1"), row("p2", sid="s-2")], lambda p: ["claude"], {}, {}, {}, None, copies=live)
+        a, b = M.plan([row("p1"), row("p2", sid="s-2")], lambda p: ["claude"], {}, {}, {}, None, on_core=live)
         self.assertEqual(a["copy"], "t3")
         self.assertNotIn("copy", b)
 
@@ -164,9 +164,7 @@ class Move(unittest.TestCase):
         self.core.spawn.assert_not_called()
         self.repoint.assert_called_once_with("p1", "t3", worker_dir=None)
         self.herdr.close.assert_called_once_with("p1")
-        self.herdr.close.reset_mock()
-        self.assertEqual(M.move(e, self.herdr, self.core, {}, keep=True), "already on core as t3")
-        self.herdr.close.assert_not_called()
+
 
     def test_a_taken_name_falls_back_to_none_except_for_an_orch_worker(self):
         taken = fleet_mux.MuxDown('a live terminal is already named "fix"', kind="name_taken")
@@ -177,6 +175,40 @@ class Move(unittest.TestCase):
         self.core.spawn.side_effect = taken
         result = M.move(self.entry(), self.herdr, self.core, {"p1": ("/o/fix", {"name": "fix"})})
         self.assertTrue(result.startswith("stays"), result)
+
+
+class Main(unittest.TestCase):
+    def run_main(self, argv, entries):
+        herdr, core = mock.Mock(), mock.Mock()
+        herdr.get.return_value = {"agent_status": "idle"}
+        out = []
+        with mock.patch.object(M, "gather", return_value=(herdr, core, {}, entries)), \
+                mock.patch.object(M, "move", side_effect=lambda e, *a: f"did {e['pane']} keep={a[-1]}") as move, \
+                mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(" ".join(map(str, a)))):
+            code = M.main(argv)
+        return code, "\n".join(out), move
+
+    def entries(self):
+        base = {"kind": "claude", "argv": ["claude", "--resume", "s"], "cwd": "/w", "name": None}
+        return [dict(base, pane="p1"), dict(base, pane="p2", copy="t3")]
+
+    def test_keep_dry_run_counts_only_what_it_would_copy(self):
+        code, out, move = self.run_main(["--keep", "--dry-run", "--all"], self.entries())
+        self.assertEqual(code, 0)
+        self.assertIn("already on core as t3", out)
+        self.assertIn("1 to copy", out)
+        move.assert_not_called()
+
+    def test_keep_copies_and_says_how_to_finish(self):
+        code, out, move = self.run_main(["--keep", "--yes", "--all"], self.entries())
+        self.assertEqual([c.args[0]["pane"] for c in move.call_args_list], ["p1"])
+        self.assertIn("did p1 keep=True", out)
+        self.assertIn(M.KEEP_NEXT, out)
+
+    def test_a_plain_run_moves_the_copy_too(self):
+        code, out, move = self.run_main(["--yes", "--all"], self.entries())
+        self.assertEqual([c.args[0]["pane"] for c in move.call_args_list], ["p1", "p2"])
+        self.assertIn(M.MOVE_NEXT, out)
 
 
 if __name__ == "__main__":
